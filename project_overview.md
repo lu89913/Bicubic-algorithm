@@ -1,100 +1,100 @@
-# Project Overview: Hardware-Friendly Bicubic Interpolation - Algorithm Comparison
+# 專案概覽：硬體友善型 Bicubic 插值演算法比較
 
-## 1. Introduction
+## 1. 引言
 
-### 1.1. Project Background
-Image scaling via bicubic interpolation offers a good balance between output quality and computational complexity compared to simpler methods. However, for hardware implementations (FPGAs/ASICs), the "standard" bicubic algorithm still presents challenges due to its reliance on floating-point arithmetic and general multiplications. This project explores optimizing bicubic interpolation for hardware, focusing on reducing resource usage while quantifying image quality impacts through Python simulation.
+### 1.1. 專案背景
+圖像縮放是數位影像處理中的一項基礎操作，與諸如雙線性或最近鄰插值等更簡單的方法相比，Bicubic 插值因其能夠產生更平滑、更少人為失真 (artifacts) 的結果而被廣泛使用。然而，對於硬體實現（如 FPGA/ASIC）而言，傳統的 Bicubic 插值由於其對浮點運算和通用乘法器的依賴，仍然帶來挑戰。本專案旨在探索針對硬體優化的 Bicubic 插值演算法，重點在於減少資源消耗，同時通過 Python 模擬來量化其對圖像品質的影響。
 
-### 1.2. Project Goal & Specifications
-The primary goals are:
-1.  To implement a traditional bicubic interpolation algorithm as a baseline.
-2.  To develop a hardware-friendly bicubic algorithm using floating-point arithmetic, where kernel coefficients are modified for easier hardware translation (e.g., into shifts and adds).
-3.  To simulate this hardware-friendly algorithm using fixed-point arithmetic to understand the impact of finite precision.
-4.  To compare these three versions in terms of image quality (PSNR) and, secondarily, Python execution time.
+### 1.2. 專案目標與規格
+主要目標包括：
+1.  實現一個傳統的 Bicubic 插值演算法作為比較基線。
+2.  開發一個使用浮點數運算的硬體友善型 Bicubic 演算法，其中卷積核係數經過修改以簡化硬體轉換（例如，轉為移位和加法操作）。
+3.  模擬此硬體友善型演算法在定點數運算下的行為，以理解有限精度帶來的影響。
+4.  比較這三個版本在圖像品質 (PSNR) 和（次要的）Python 執行時間方面的表現。
 
-**Specifications:**
-*   **Input Image:** Primarily 256x256 pixels (grayscale and color).
-*   **Output Image:** Primarily 512x512 pixels (2x upscale).
-*   **Optimization Target:** Reduce complexity of applying kernel coefficients in hardware.
-*   **Quality Metric:** Peak Signal-to-Noise Ratio (PSNR).
-*   **Simulation Environment:** Python with NumPy and scikit-image.
+**規格參數：**
+*   **輸入圖像：** 主要為 256x256 像素（灰階和彩色）。
+*   **輸出圖像：** 主要為 512x512 像素（2倍放大）。
+*   **優化目標：** 降低在硬體中應用卷積核係數的複雜度。
+*   **品質度量：** 峰值信噪比 (PSNR)。
+*   **模擬環境：** Python，使用 NumPy 和 scikit-image 套件。
 
-## 2. Algorithm Versions and Implementation Details
+## 2. 演算法版本與實現細節
 
-### 2.1. `traditional_bicubic.py` - Baseline Implementation
-*   **Purpose:** Serves as the reference for correctness and quality.
-*   **Algorithm:** Implements the standard bicubic interpolation using Keys' cubic kernel with `a = -0.5`. Coefficients are `1.5, -2.5, -0.5`, etc.
-*   **Kernel `cubic(x)`:** Direct floating-point implementation of the piecewise cubic polynomial.
-*   **`imresize()` function:** Main interface.
-    *   `mode='org'`: Loop-based implementation (`imresizemex`), generally more robust for various image dimensions if logic is sound.
-    *   `mode='vec'`: Original vectorized version (`imresizevec`) provided by the user, which has known limitations in handling N-D data and its internal reshape logic. This is kept for fidelity but may not be reliable for all comparisons.
-*   **Key Challenge:** Direct hardware implementation of floating-point coefficient multipliers is resource-intensive.
+### 2.1. `traditional_bicubic.py` - 基線實現
+*   **目的：** 作為正確性和圖像品質的參考標準。
+*   **演算法：** 實現標準的 Bicubic 插值，使用 Keys 的三次卷積核，參數 `a = -0.5`。對應的係數如 `1.5, -2.5, -0.5` 等。
+*   **卷積核 `cubic(x)`：** 分段三次多項式的直接浮點實現。
+*   **`imresize()` 函數：** 主要接口。
+    *   `mode='org'`: 基於迴圈的實現 (`imresizemex`)，如果邏輯正確，通常對各種圖像維度更為穩健。
+    *   `mode='vec'`: 用戶提供的原始向量化版本 (`imresizevec`)，在處理 N 維數據及其內部 reshape 邏輯方面存在已知限制。此版本被保留以求忠實，但可能不適用於所有比較。
+*   **主要挑戰：** 浮點係數乘法器的直接硬體實現資源消耗較大。
 
-### 2.2. `optimized_bicubic_float.py` - Hardware-Friendly (Float)
-*   **Purpose:** To show that the bicubic kernel can be mathematically reformulated for hardware without quality loss in an ideal (floating-point) scenario.
-*   **Algorithm:** Uses the same bicubic theory but re-expresses kernel calculations.
-*   **Kernel `hardware_friendly_cubic(x_float)`:**
-    *   Coefficients are represented as exact fractions. For example, `1.5*val` is calculated as `(3*val)/2`.
-    *   All arithmetic is still standard Python floating-point.
-    *   This demonstrates the *mathematical transformation* step before considering fixed-point effects.
-*   **`imresize_optimized_float()` function:**
-    *   Uses the `hardware_friendly_cubic` kernel.
-    *   Employs a robust N-D vectorized implementation (`imresizevec_optimized`) for `mode='vec'`, and a corrected N-D loop-based version (`imresizemex_optimized`) for `mode='org'`.
-*   **Expected Hardware Benefit (Conceptual):** Operations like `(3*val)/2` can translate to `((val << 1) + val) >> 1` in hardware, replacing a general multiplier with shifters and an adder.
+### 2.2. `optimized_bicubic_float.py` - 硬體友善型 (浮點)
+*   **目的：** 展示在理想（浮點）情況下，Bicubic 卷積核可以進行數學上的重構以適應硬體，而不會損失圖像品質。
+*   **演算法：** 採用相同的 Bicubic 理論，但重新表達了卷積核的計算方式。
+*   **卷積核 `hardware_friendly_cubic(x_float)`：**
+    *   係數表示為精確分數。例如，`1.5*val` 計算為 `(3*val)/2`。
+    *   所有算術運算仍使用標準 Python 浮點數。
+    *   此步驟演示了在考慮定點效應之前的 *數學轉換*。
+*   **`imresize_optimized_float()` 函數：**
+    *   使用 `hardware_friendly_cubic` 卷積核。
+    *   為 `mode='vec'` 採用了穩健的 N 維向量化實現 (`imresizevec_optimized`)，為 `mode='org'` 採用了修正後的 N 維迴圈版本 (`imresizemex_optimized`)。
+*   **預期硬體優勢 (概念上)：** 諸如 `(3*val)/2` 的操作在硬體中可以轉換為 `((val << 1) + val) >> 1`，從而用移位器和一個加法器替代通用乘法器。
 
-### 2.3. `optimized_bicubic_fixed_point.py` - Hardware-Friendly (Fixed-Point Simulation)
-*   **Purpose:** To simulate the `optimized_bicubic_float.py` algorithm under fixed-point arithmetic constraints, providing an estimate of image quality degradation due to finite precision.
-*   **Fixed-Point Simulation:**
-    *   **Parameters:**
-        *   `FP_W_Kernel=16, FP_F_Kernel=8`: For kernel calculations (distances, intermediate weights). Range: approx -128.0 to +127.996.
-        *   `FP_W_Pixel=24, FP_F_Pixel=8`: For pixel data representation during interpolation and for final scaled weights. Range allows for accumulation.
-    *   **Helper Functions:** `float_to_fixed`, `fixed_to_float`, `fixed_add`, `fixed_subtract`, `fixed_multiply`, `saturate`. These simulate fixed-point behavior including saturation for overflows. `fixed_multiply` handles scaling based on fractional bits of inputs and output.
-*   **Kernel `hardware_friendly_cubic_fixed_point(x_float)`:**
-    *   Input distance `x_float` is converted to fixed-point (`x_fixed`).
-    *   All internal calculations (`absx2_fixed`, `absx3_fixed`, application of coefficients like `3`, `5`, `2.0`) use the fixed-point helper functions.
-    *   The final division by 2 is simulated by `int(np.round(num / 2.0))`, approximating a right shift with rounding.
-    *   Output is a fixed-point weight (scaled integer with `FP_F_Kernel` fractional bits).
-*   **`contributions_fixed_point()`:**
-    *   The fixed-point kernel's output is temporarily converted to float for numerically stable normalization of weights.
-    *   Normalized float weights are then converted back to fixed-point (with `FP_F_Pixel` fractional bits) for application to pixel data. This avoids implementing a full fixed-point division for normalization.
-*   **`imresize_fixed_point()` (via `imresizevec_fixed_point`):**
-    *   Input `uint8` image data is converted to fixed-point (`FP_F_Pixel` fractional bits, unsigned).
-    *   Pixel data (fixed-point) is multiplied by weights (fixed-point) using `fixed_multiply`.
-    *   Products are summed (accumulation). The accumulator maintains `FP_F_Pixel` fractional accuracy.
-    *   Final accumulated fixed-point values are converted back to float, then clipped to [0,255] and rounded to `uint8`.
-    *   Currently, only `mode='vec'` is implemented, using element-wise loops for fixed-point operations within the vectorized structure for clarity.
-*   **Key Insight:** This version reveals the PSNR impact of choosing specific bit-widths and the effects of quantization/overflow.
+### 2.3. `optimized_bicubic_fixed_point.py` - 硬體友善型 (定點模擬)
+*   **目的：** 在定點數運算限制下模擬 `optimized_bicubic_float.py` 演算法，以評估有限精度對圖像品質的影響。
+*   **定點模擬：**
+    *   **參數：**
+        *   `FP_W_Kernel=16, FP_F_Kernel=8`：用於卷積核計算（距離、中間權重）。範圍：約 -128.0 至 +127.996。
+        *   `FP_W_Pixel=24, FP_F_Pixel=8`：用於插值過程中的像素數據表示及最終縮放後的權重。此範圍允許進行累加。
+    *   **輔助函數：** `float_to_fixed`, `fixed_to_float`, `fixed_add`, `fixed_subtract`, `fixed_multiply`, `saturate`。這些函數模擬定點行為，包括溢出時的飽和處理。`fixed_multiply` 根據輸入和輸出的小數位數處理縮放。
+*   **卷積核 `hardware_friendly_cubic_fixed_point(x_float)`：**
+    *   輸入距離 `x_float` 被轉換為定點數 (`x_fixed`)。
+    *   所有內部計算（`absx2_fixed`, `absx3_fixed`，以及應用如 `3`, `5`, `2.0` 等係數）均使用定點輔助函數。
+    *   最終的除以 2 操作通過 `int(np.round(num / 2.0))` 模擬，近似於帶舍入的右移。
+    *   輸出為一個定點權重值（帶有 `FP_F_Kernel` 個小數位元的縮放整數）。
+*   **`contributions_fixed_point()`：**
+    *   定點卷積核的輸出暫時轉換回浮點數，以便進行數值穩定的權重歸一化。
+    *   歸一化後的浮點權重隨後轉換回定點數（具有 `FP_F_Pixel` 個小數位元），用於與像素數據相乘。這避免了為歸一化實現複雜的定點除法。
+*   **`imresize_fixed_point()` (通過 `imresizevec_fixed_point`)：**
+    *   輸入的 `uint8` 圖像數據轉換為定點表示（`FP_F_Pixel` 個小數位元，無符號）。
+    *   像素數據（定點）與權重（定點）使用 `fixed_multiply` 相乘。
+    *   乘積被累加。累加器保持 `FP_F_Pixel` 的小數精度。
+    *   最終累加的定點值轉換回浮點，然後裁剪至 [0,255] 並四捨五入為 `uint8`。
+    *   目前僅實現了 `mode='vec'`，為清晰起見，在向量化結構內部對定點操作使用了元素級迴圈。
+*   **關鍵洞察：** 此版本揭示了選擇特定位寬以及量化/溢出效應對 PSNR 的影響。
 
-## 3. Simulation Setup and Comparison (`compare_all_versions.py`)
+## 3. 模擬設置與比較 (`compare_all_versions.py`)
 
-*   **Test Images:** Generates 256x256 grayscale and color test images with varied patterns.
-*   **Upscaling:** All versions upscale images to 512x512.
-*   **Execution:**
-    *   Calls the main `imresize` function from each of the three files.
-    *   Tests both `'org'` and `'vec'` modes where available and appropriate.
-*   **Metrics:**
-    *   **PSNR:**
-        *   `optimized_float` vs. `traditional` (Ideally using `traditional`'s `org` mode as the most stable baseline).
-        *   `optimized_fixed_point` vs. `traditional` (or `optimized_float`).
-        *   `optimized_fixed_point` vs. `optimized_float` (to isolate fixed-point effects).
-    *   **Execution Time:** Python execution time for each method (provides a rough performance indication in the simulation environment).
+*   **測試圖像：** 生成 256x256 的灰階和彩色測試圖像，具有多樣化的圖案。
+*   **圖像放大：** 所有版本均將圖像放大至 512x512。
+*   **執行：**
+    *   調用三個檔案中各自主要的 `imresize` 相關函數。
+    *   在可用且適當的情況下測試 `'org'` 和 `'vec'` 兩種模式。
+*   **度量指標：**
+    *   **PSNR：**
+        *   `optimized_float` vs. `traditional` (理想情況下使用 `traditional` 的 `org` 模式作為最穩定的基線)。
+        *   `optimized_fixed_point` vs. `traditional` (或 `optimized_float`)。
+        *   `optimized_fixed_point` vs. `optimized_float` (以隔離定點效應)。
+    *   **執行時間：** 各方法在 Python 環境中的執行時間 (提供模擬環境中粗略的性能指標)。
 
-## 4. Expected Simulation Summary & Analysis
+## 4. 預期模擬總結與分析
 
-*   **Optimized Float vs. Traditional:**
-    *   **PSNR:** Expected to be extremely high (approaching infinity if `traditional_bicubic.py` (org mode) output is used as reference), as the `optimized_bicubic_float.py` is mathematically equivalent. Any minor difference would be due to floating-point operation ordering.
-    *   **Hardware Implication:** Confirms that the coefficient reformulation itself doesn't degrade quality, validating the first step of optimization.
+*   **優化版浮點 vs. 傳統版：**
+    *   **PSNR：** 預期極高 (如果以 `traditional_bicubic.py` (org 模式) 的輸出作為參考，應接近無窮大)，因為 `optimized_bicubic_float.py` 在數學上是等效的。任何微小差異將源於浮點運算的順序。
+    *   **硬體啟示：** 確認係數的重構本身不會降低品質，驗證了優化的第一步。
 
-*   **Optimized Fixed-Point vs. Optimized Float (or Traditional):**
-    *   **PSNR:** Expected to be lower than the pure float comparison. The magnitude of the drop will depend on the chosen `W` and `F` values for `FP_F_Kernel` and `FP_F_Pixel`.
-        *   Too few fractional bits (`F`) can lead to significant quantization errors in weights, distances, and pixel values.
-        *   Too few integer bits (`W-F`) can lead to overflow/saturation, clipping details.
-    *   **Analysis:** The goal is to find fixed-point parameters that yield a "good enough" PSNR (e.g., >30-35 dB is often acceptable, but application-specific) while allowing for minimal bit-widths in hardware.
-    *   The PSNR difference between `optimized_fixed_point` and `optimized_float` will most directly show the impact of the simulated fixed-point arithmetic.
+*   **優化版定點 vs. 優化版浮點 (或傳統版)：**
+    *   **PSNR：** 預期會低於純浮點比較。下降的幅度取決於為 `FP_F_Kernel` 和 `FP_F_Pixel` 所選的 `W` 和 `F` 值。
+        *   過少的小數位元 (`F`) 可能導致權重、距離和像素值的嚴重量化誤差。
+        *   過少的整數位元 (`W-F`) 可能導致溢出/飽和，從而裁剪掉細節。
+    *   **分析：** 目標是找到能夠產生“足夠好”的 PSNR (例如 >30-35 dB 通常可接受，但依應用而定) 同時允許在硬體中使用最小位寬的定點參數。
+    *   `optimized_fixed_point` 和 `optimized_float` 之間的 PSNR 差異將最直接地顯示模擬定點運算的影響。
 
-*   **Execution Times:**
-    *   While Python execution times don't directly map to hardware speed, significant differences in the Python versions might hint at algorithmic complexity differences that *could* translate to hardware, but this is a very indirect measure. The primary focus for hardware is resource reduction from the algorithm's structure.
+*   **執行時間：**
+    *   雖然 Python 執行時間不直接映射到硬體速度，但 Python 版本間的顯著差異可能暗示了演算法複雜度的差異，這 *可能* 會轉化到硬體上，但這是一個非常間接的衡量。對於硬體而言，主要的關注點是通過演算法結構實現資源減少。
 
-*   **Overall Hardware Implication:** The project aims to show a clear path from a standard algorithm to one that is structurally simpler for hardware (fewer/no general multipliers for coefficients). The fixed-point simulation then provides a crucial estimate of how much "real-world" image quality might be affected when precision is necessarily limited in hardware. This informs trade-offs in actual hardware design.
+*   **總體硬體啟示：** 本專案旨在展示一條從標準演算法到結構上更簡單（卷積核係數應用更少/無需通用乘法器）的硬體實現路徑。定點模擬則為實際硬體設計中精度受限時，“真實世界”圖像品質可能受到的影響提供關鍵的評估。這為實際硬體設計中的權衡提供了資訊。
 
-This structured comparison will provide valuable insights into the feasibility and impact of these hardware-friendly optimizations for bicubic interpolation.
+這種結構化的比較將為這些硬體友善型 Bicubic 插值優化的可行性及其影響提供有價值的見解。
