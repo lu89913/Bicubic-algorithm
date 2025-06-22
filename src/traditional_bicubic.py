@@ -11,15 +11,15 @@ def cubic_kernel(x, a=-0.5):
     Returns:
         float or np.ndarray: The kernel weight.
     """
-    x = np.abs(x)
-    if x <= 1:
-        return (a + 2) * (x**3) - (a + 3) * (x**2) + 1
-    elif 1 < x <= 2:
-        return a * (x**3) - 5 * a * (x**2) + 8 * a * x - 4 * a
+    x_abs = np.abs(x) # Keep original x for sign if needed, though kernel is symmetric
+    if x_abs <= 1:
+        return (a + 2) * (x_abs**3) - (a + 3) * (x_abs**2) + 1
+    elif 1 < x_abs <= 2:
+        return a * (x_abs**3) - 5 * a * (x_abs**2) + 8 * a * x_abs - 4 * a
     else:
         return 0.0
 
-def bicubic_interpolation_pixel(p, tx, ty, a=-0.5):
+def bicubic_interpolation_pixel(p, tx, ty, a=-0.5): # Add 'a' here
     """
     Performs bicubic interpolation for a single pixel.
     Args:
@@ -44,10 +44,10 @@ def bicubic_interpolation_pixel(p, tx, ty, a=-0.5):
                    cubic_kernel(1 - tx, a),
                    cubic_kernel(2 - tx, a)])
 
-    wy = np.array([cubic_kernel(1 + ty, a),
-                   cubic_kernel(ty, a),
-                   cubic_kernel(1 - ty, a),
-                   cubic_kernel(2 - ty, a)])
+    wy = np.array([cubic_kernel(1 + ty, a=a),
+                   cubic_kernel(ty, a=a),
+                   cubic_kernel(1 - ty, a=a),
+                   cubic_kernel(2 - ty, a=a)])
 
     # p is a 4x4 matrix of pixels
     # interpolated value = wy^T * p * wx
@@ -57,7 +57,7 @@ def bicubic_interpolation_pixel(p, tx, ty, a=-0.5):
     interpolated_value = wy.T @ p_float @ wx
     return interpolated_value
 
-def bicubic_resize(image, scale_factor_x, scale_factor_y, a=-0.5):
+def bicubic_resize(image, scale_factor_x, scale_factor_y, a=-0.5): # 'a' is already here, ensure it's used
     """
     Resizes an image using bicubic interpolation.
     Args:
@@ -108,7 +108,7 @@ def bicubic_resize(image, scale_factor_x, scale_factor_y, a=-0.5):
             p = padded_image[y_int + 1 : y_int + 1 + 4,  # rows (y-coords)
                              x_int + 1 : x_int + 1 + 4]  # cols (x-coords)
             
-            interpolated_val = bicubic_interpolation_pixel(p, tx, ty, a)
+            interpolated_val = bicubic_interpolation_pixel(p, tx, ty, a=a) # Pass 'a'
             
             # Clip to valid pixel range (e.g., 0-255 for uint8)
             if np.issubdtype(output_image.dtype, np.integer):

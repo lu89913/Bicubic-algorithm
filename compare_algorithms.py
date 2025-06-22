@@ -42,18 +42,39 @@ def calculate_psnr_mse(img1, img2):
 
 def analyze_kernel_complexity():
     print("\n--- Kernel Complexity Analysis (Qualitative) ---")
-    print("Traditional Float Kernel (per call, a=-0.5):")
-    print("  - Approx. 4-6 float multiplications (for x^2, x^3, and with coeffs like 1.5, 2.5).")
-    print("  - Approx. 2-3 float additions/subtractions.")
-    print("Hardware-Friendly Fixed-Point Kernel (per call, a=-0.5, F_BITS={F_BITS}):")
-    print("  - Integer multiplications for x^2, x^3: 2 (e.g., Q2.F * Q2.F -> Q4.2F).")
-    print("  - Coefficient 'multiplications' (1.5, 2.5, -0.5, -4.0) replaced by:")
-    print("    - Bit shifts (left/right): Approx. 3-4.")
-    print("    - Integer additions/subtractions: Approx. 3-4.")
-    print("  - Benefit: Eliminates float DSPs for coefficients, uses basic logic ops.")
+    print("Traditional Float Kernel (per call, generic 'a'):")
+    print("  - Approx. 4-6 float multiplications (for x^2, x^3, and with 'a'-dependent coeffs).")
+    print("  - Approx. 3-4 float additions/subtractions.")
+
+    print(f"\nHardware-Friendly Fixed-Point Kernel (per call, F_BITS={F_BITS}):")
+    print("  - Common operations: Integer multiplications for x^2, x^3 (scaled): 2.")
+    print("                     Shifts for scaling x^2, x^3 products: 2-3.")
+
+    print("\n  For specific 'a' values (coefficient multiplications are optimized):")
+    print("  a = -0.5:")
+    print("    - Segment |x|<1 (1.5x^3 - 2.5x^2 + 1): ~2 shifts, ~2 adds for 1.5x^3; ~2 shifts, ~2 adds for 2.5x^2.")
+    print("    - Segment 1<=|x|<2 (-0.5x^3 + 2.5x^2 - 4x + 2): ~1 shift for -0.5x^3; ~2 shifts, ~2 adds for 2.5x^2; ~1 shift for -4x.")
+    print("    - Total: Approx. 4-6 shifts, 4-6 integer additions/subtractions per call (varies by segment).")
+    print("  a = -0.75:")
+    print("    - Segment |x|<1 (1.25x^3 - 2.25x^2 + 1): ~2 shifts, ~1 add for 1.25x^3; ~2 shifts, ~1 add for 2.25x^2.")
+    print("    - Segment 1<=|x|<2 (-0.75x^3 + 3.75x^2 - 6x + 3): ~2 shifts, ~1 sub for -0.75x^3; ~2 shifts, ~1 sub for 3.75x^2; ~2 shifts, ~1 add for -6x.")
+    print("    - Total: Approx. 4-6 shifts, 4-6 integer additions/subtractions per call.")
+    print("  a = -1.0:")
+    print("    - Segment |x|<1 (x^3 - 2x^2 + 1): 0 shifts for x^3; ~1 shift for 2x^2.")
+    print("    - Segment 1<=|x|<2 (-x^3 + 5x^2 - 8x + 4): 0 shifts for -x^3; ~1 shift, ~1 add for 5x^2; ~1 shift for -8x.")
+    print("    - Total: Approx. 2-4 shifts, 2-4 integer additions/subtractions per call.")
+
+    print("\n  For generic 'a' values (using general fixed-point multiplication for coefficients):")
+    print("    - Each 'a'-dependent coefficient (e.g., a+2, a+3, a, -5a, 8a, -4a) is pre-calculated as QsY.F.")
+    print("    - Multiplication of these fixed-point coeffs with scaled x, x^2, x^3 terms:")
+    print("      - Segment |x|<1: 2 fixed-point multiplications (e.g., (a+2)*x^3, (a+3)*x^2).")
+    print("      - Segment 1<=|x|<2: 3 fixed-point multiplications (e.g., a*x^3, -5a*x^2, 8a*x).")
+    print("    - These are full integer multiplications, potentially more complex than shifts/adds for specific 'a'.")
+
+    print("\n  Benefit of optimized 'a' values: Replaces general integer multiplications for coefficients with simpler bit shifts and adds, leading to smaller/faster hardware.")
 
 def analyze_interpolation_complexity():
-    print("\n--- Interpolation Complexity Analysis (per output pixel) ---")
+    print("\n--- Interpolation Complexity Analysis (per output pixel, independent of 'a' value for this part) ---")
     print("Traditional Float (after 8 kernel calls):")
     print("  - Core Interpolation (wy.T @ p @ wx):")
     print("    - 20 float multiplications (pixel/intermediate * weight).")
@@ -116,54 +137,75 @@ if __name__ == "__main__":
         sys.exit(1)
 
     scale_x, scale_y = 1.5, 1.5
-    
+    a_values_to_test = [-0.5, -0.75, -1.0] # Values of 'a' to test
+
     print(f"Comparing Bicubic Algorithms for image: '{image_filename}' ({np_img_orig.shape[1]}x{np_img_orig.shape[0]})")
     print(f"Scaling by factor: {scale_x}x horizontally, {scale_y}x vertically.")
 
-    # --- Pillow (Reference) ---
+    # --- Pillow (Reference, typically a=-0.5 or similar) ---
     start_time = time.time()
     expected_width = int(np.ceil(np_img_orig.shape[1] * scale_x))
     expected_height = int(np.ceil(np_img_orig.shape[0] * scale_y))
     pil_img_resized = pil_img_orig.resize((expected_width, expected_height), Image.Resampling.BICUBIC)
     np_pil_resized = np.array(pil_img_resized, dtype=np.uint8)
     pillow_time = time.time() - start_time
-    print(f"\n1. Pillow BICUBIC resizing done in {pillow_time:.4f}s")
+    print(f"\n1. Pillow BICUBIC resizing done in {pillow_time:.4f}s (Used as reference for a ~ -0.5)")
 
-    # --- Traditional Float Bicubic ---
-    start_time = time.time()
-    np_float_resized = float_bicubic_resize(np_img_orig, scale_x, scale_y)
-    float_time = time.time() - start_time
-    print(f"2. Traditional Float Bicubic resizing done in {float_time:.4f}s")
+    for a_val in a_values_to_test:
+        print(f"\n--- Testing with a = {a_val} ---")
 
-    # --- Hardware-Friendly Fixed-Point Bicubic ---
-    start_time = time.time()
-    np_fixed_resized = bicubic_resize_fixed_point(np_img_orig, scale_x, scale_y)
-    fixed_time = time.time() - start_time
-    print(f"3. Hardware-Friendly Fixed-Point Bicubic resizing done in {fixed_time:.4f}s")
+        # --- Traditional Float Bicubic ---
+        start_time = time.time()
+        np_float_resized = float_bicubic_resize(np_img_orig, scale_x, scale_y, a=a_val)
+        float_time = time.time() - start_time
+        print(f"  2. Traditional Float Bicubic (a={a_val}) resizing done in {float_time:.4f}s")
 
-    # --- Image Quality Comparison ---
-    print("\n--- Image Quality (PSNR dB / MSE) ---")
-    psnr_float_vs_pillow, mse_float_vs_pillow = calculate_psnr_mse(np_float_resized, np_pil_resized)
-    print(f"  Float vs Pillow: PSNR={psnr_float_vs_pillow:.2f} dB, MSE={mse_float_vs_pillow:.2f}")
+        # --- Hardware-Friendly Fixed-Point Bicubic ---
+        start_time = time.time()
+        np_fixed_resized = bicubic_resize_fixed_point(np_img_orig, scale_x, scale_y, a_float=a_val)
+        fixed_time = time.time() - start_time
+        print(f"  3. Hardware-Friendly Fixed-Point Bicubic (a={a_val}) resizing done in {fixed_time:.4f}s")
 
-    psnr_fixed_vs_pillow, mse_fixed_vs_pillow = calculate_psnr_mse(np_fixed_resized, np_pil_resized)
-    print(f"  Fixed-Point vs Pillow: PSNR={psnr_fixed_vs_pillow:.2f} dB, MSE={mse_fixed_vs_pillow:.2f}")
+        # --- Image Quality Comparison ---
+        print(f"\n  --- Image Quality (PSNR dB / MSE) for a = {a_val} ---")
+        psnr_float_vs_pillow, mse_float_vs_pillow = calculate_psnr_mse(np_float_resized, np_pil_resized)
+        print(f"    Float (a={a_val}) vs Pillow: PSNR={psnr_float_vs_pillow:.2f} dB, MSE={mse_float_vs_pillow:.2f}")
+
+        psnr_fixed_vs_pillow, mse_fixed_vs_pillow = calculate_psnr_mse(np_fixed_resized, np_pil_resized)
+        print(f"    Fixed-Point (a={a_val}) vs Pillow: PSNR={psnr_fixed_vs_pillow:.2f} dB, MSE={mse_fixed_vs_pillow:.2f}")
+
+        psnr_fixed_vs_float, mse_fixed_vs_float = calculate_psnr_mse(np_fixed_resized, np_float_resized)
+        print(f"    Fixed-Point (a={a_val}) vs Float (a={a_val}): PSNR={psnr_fixed_vs_float:.2f} dB, MSE={mse_fixed_vs_float:.2f}")
+
+        # --- Complexity Analysis (specific to this 'a' if kernel analysis is updated) ---
+        # analyze_kernel_complexity() # This function needs to be parameterized or display general info
+
+        # --- Memory Access Analysis (independent of 'a') ---
+        # analyze_memory_access(np_img_orig.shape, np_fixed_resized.shape, scale_x, scale_y) # Only run once if results are same
+
+        print(f"\n  --- Summary for Hardware-Friendly Version (a={a_val}) ---")
+        print(f"  1. Image Quality: Fixed-Point vs Float (a={a_val}): PSNR={psnr_fixed_vs_float:.2f} dB. Fixed-Point vs Pillow: PSNR={psnr_fixed_vs_pillow:.2f} dB.")
+        print(f"     (Using {F_BITS}-bit fractional precision for fixed-point.)")
+        # Computation simplification summary might need to be general or mention specific 'a' if optimized
+        print("  2. Computation Simplification (Qualitative):")
+        if a_val in [-0.5, -0.75, -1.0]:
+            print(f"     - Kernel for a={a_val}: Optimized with shifts & integer adds.")
+        else:
+            print(f"     - Kernel for a={a_val}: Uses generic fixed-point multiplications for coefficients.")
+        print("     - Interpolation: Float multiplications (20 per pixel) replaced by integer multiplications.")
     
-    psnr_fixed_vs_float, mse_fixed_vs_float = calculate_psnr_mse(np_fixed_resized, np_float_resized)
-    print(f"  Fixed-Point vs Float: PSNR={psnr_fixed_vs_float:.2f} dB, MSE={mse_fixed_vs_float:.2f}")
-
-    # --- Complexity Analysis ---
-    analyze_kernel_complexity()
+    # General analyses that are not 'a' dependent can be run once outside the loop
+    print("\n--- General Complexity & Memory Analysis ---")
+    analyze_kernel_complexity() # Should be updated to discuss different 'a' values
     analyze_interpolation_complexity()
-    
-    # --- Memory Access Analysis ---
-    analyze_memory_access(np_img_orig.shape, np_fixed_resized.shape, scale_x, scale_y)
+    # Assuming np_fixed_resized from the last iteration for shape, or use expected_width/height
+    analyze_memory_access(np_img_orig.shape, (expected_height, expected_width), scale_x, scale_y)
 
-    print("\n--- Summary of Advantages for Hardware-Friendly Version ---")
-    print(f"1. Image Quality: Maintains high PSNR ({psnr_fixed_vs_float:.2f} dB against float version, "
-          f"{psnr_fixed_vs_pillow:.2f} dB against Pillow) with {F_BITS}-bit fractional precision.")
-    print("2. Computation Simplification:")
-    print("   - Kernel: Float multiplications for coefficients replaced by shifts & integer adds.")
+    print("\n--- Overall Summary of Advantages for Hardware-Friendly Version ---")
+    print(f"  Key benefit: Maintains high PSNR across various 'a' values while enabling hardware-efficient computation.")
+    print(f"  (Refer to specific 'a' value summaries above for detailed PSNRs with {F_BITS}-bit fractional precision)")
+    print("  Computation Simplification:")
+    print("   - Kernel: Float multiplications for coefficients replaced by shifts & integer adds (for a=-0.5, -0.75, -1.0) or generic fixed-point ops.")
     print("   - Interpolation: Float multiplications (20 per pixel) replaced by integer multiplications.")
     print("   - Overall: Significant reduction in need for full float DSP units, replaced by simpler integer logic and shifters.")
     print("3. Memory Bandwidth Reduction (with line buffers):")

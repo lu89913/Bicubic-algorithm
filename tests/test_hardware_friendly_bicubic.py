@@ -26,6 +26,7 @@ class TestHardwareFriendlyBicubic(unittest.TestCase):
 
         self.scale_factor_x = 1.5
         self.scale_factor_y = 1.5
+        self.kernel_a_param = -0.5 # Default 'a' for baseline tests
 
     def test_fixed_point_resize_against_float(self):
         """
@@ -34,11 +35,13 @@ class TestHardwareFriendlyBicubic(unittest.TestCase):
         """
         float_resized_np = float_bicubic_resize(self.original_np_img, 
                                                 self.scale_factor_x, 
-                                                self.scale_factor_y)
+                                                self.scale_factor_y,
+                                                a=self.kernel_a_param)
         
         fixed_resized_np = bicubic_resize_fixed_point(self.original_np_img,
                                                       self.scale_factor_x,
-                                                      self.scale_factor_y)
+                                                      self.scale_factor_y,
+                                                      a_float=self.kernel_a_param)
 
         self.assertEqual(fixed_resized_np.shape, float_resized_np.shape, 
                          "Shape mismatch between fixed-point and float output.")
@@ -68,7 +71,10 @@ class TestHardwareFriendlyBicubic(unittest.TestCase):
 
     def test_output_shape_fixed_point(self):
         """Test if the output image from fixed-point has the correct shape."""
-        resized_img = bicubic_resize_fixed_point(self.original_np_img, self.scale_factor_x, self.scale_factor_y)
+        resized_img = bicubic_resize_fixed_point(self.original_np_img,
+                                                 self.scale_factor_x,
+                                                 self.scale_factor_y,
+                                                 a_float=self.kernel_a_param)
         
         original_height, original_width = self.original_np_img.shape
         expected_height = int(np.ceil(original_height * self.scale_factor_y))
