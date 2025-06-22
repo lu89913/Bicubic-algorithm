@@ -190,11 +190,24 @@ def contributions_fixed_point(in_length, out_length, scale, kernel_fixed_point_f
     indices = ind.astype(np.int32)
 
     # Calculate float weights using h_float (which internally uses fixed-point kernel)
-    float_weights = h_float(np.expand_dims(u, axis=1) - (indices.astype(np.float64) + 1))
+    # The kernel_fixed_point_func expects a scalar, so we must iterate.
+    distances_float_array = np.expand_dims(u, axis=1) - (indices.astype(np.float64) + 1)
+    float_weights_array = np.zeros_like(distances_float_array)
 
-    sum_float_weights = np.sum(float_weights, axis=1, keepdims=True)
-    normalized_float_weights = np.divide(float_weights, sum_float_weights,
-                                         out=np.zeros_like(float_weights), where=sum_float_weights != 0)
+    for r_idx in range(distances_float_array.shape[0]):
+        for c_idx in range(distances_float_array.shape[1]):
+            dist_scalar = distances_float_array[r_idx, c_idx]
+            # Apply the lambda h_float logic manually for each scalar distance
+            if scale < 1: # Shrink
+                fixed_kernel_out = kernel_fixed_point_func(scale * dist_scalar)
+                float_weights_array[r_idx, c_idx] = scale * fixed_to_float(fixed_kernel_out, FP_F_Kernel)
+            else: # Enlarge
+                fixed_kernel_out = kernel_fixed_point_func(dist_scalar)
+                float_weights_array[r_idx, c_idx] = fixed_to_float(fixed_kernel_out, FP_F_Kernel)
+
+    sum_float_weights = np.sum(float_weights_array, axis=1, keepdims=True)
+    normalized_float_weights = np.divide(float_weights_array, sum_float_weights,
+                                         out=np.zeros_like(float_weights_array), where=sum_float_weights != 0)
 
     # Convert normalized float weights to fixed-point for use in interpolation sum
     # These weights will multiply pixel data (scaled to FP_F_Pixel).
@@ -239,14 +252,24 @@ def imresizevec_fixed_point(inimg_uint8, fixed_weights, indices, dim):
         # Each product: in_fixed (FP_F_Pixel) * weight_fixed (FP_F_Pixel)
         # Output of fixed_multiply should be scaled to FP_F_Pixel. (F_out = FP_F_Pixel)
         # So, intermediate product has 2*FP_F_Pixel, then shifted right by FP_F_Pixel.
-        products_fixed = np.zeros_like(gathered_pixels_fixed, dtype=np.int64) # Temp for larger intermediate
-        for i in np.ndindex(gathered_pixels_fixed.shape):
-            products_fixed[i] = fixed_multiply(gathered_pixels_fixed[i], reshaped_fixed_weights[i],
-                                               FP_W_Pixel, FP_F_Pixel, FP_F_Pixel, FP_F_Pixel)
+        products_fixed = np.zeros_like(gathered_pixels_fixed, dtype=np.int64)
+        # Correct indexing for reshaped_fixed_weights
+        for i_lout in range(gathered_pixels_fixed.shape[0]):      # L_out dimension
+            for i_ncoeff in range(gathered_pixels_fixed.shape[1]): # N_coeffs dimension
+                # Scalar weight for this (L_out, N_coeff) pair
+                current_weight_scalar = reshaped_fixed_weights[i_lout, i_ncoeff, 0] # Assuming last dims are size 1
+                if inimg_fixed.ndim > 2 : # e.g. color image, reshaped_weights might be (L_out, N_coeffs, 1, 1)
+                     current_weight_scalar = reshaped_fixed_weights[i_lout, i_ncoeff, 0, 0]
 
-        # Summing these products (which are already scaled to FP_F_Pixel)
+
+                for other_indices in np.ndindex(gathered_pixels_fixed.shape[2:]): # Iterate over D1, D2, ...
+                    full_idx_gathered = (i_lout, i_ncoeff) + other_indices
+                    pixel_val_fixed = gathered_pixels_fixed[full_idx_gathered]
+
+                    products_fixed[full_idx_gathered] = fixed_multiply(pixel_val_fixed, current_weight_scalar,
+                                                                       FP_W_Pixel, FP_F_Pixel, FP_F_Pixel, FP_F_Pixel)
+
         outimg_fixed_sum = np.sum(products_fixed, axis=1).astype(np.int32)
-        # Saturate the sum, though overflow less likely if individual products are saturated
         for i in np.ndindex(outimg_fixed_sum.shape):
              outimg_fixed_sum[i] = saturate(outimg_fixed_sum[i], FP_MIN_Pixel, FP_MAX_Pixel)
         outimg_fixed_final = outimg_fixed_sum
@@ -254,13 +277,22 @@ def imresizevec_fixed_point(inimg_uint8, fixed_weights, indices, dim):
     elif dim == 1:
         permute_order = np.roll(np.arange(inimg_fixed.ndim), -dim)
         img_perm_fixed = np.transpose(inimg_fixed, permute_order)
-        gathered_pixels_fixed = img_perm_fixed[indices]
+        gathered_pixels_fixed = img_perm_fixed[indices] # Shape (L_out, N_coeffs, D_other1, ...)
         reshaped_fixed_weights = fixed_weights.reshape(w_shape[0], w_shape[1], *((1,)*(img_perm_fixed.ndim - 1)))
 
         products_fixed = np.zeros_like(gathered_pixels_fixed, dtype=np.int64)
-        for i in np.ndindex(gathered_pixels_fixed.shape):
-            products_fixed[i] = fixed_multiply(gathered_pixels_fixed[i], reshaped_fixed_weights[i],
-                                               FP_W_Pixel, FP_F_Pixel, FP_F_Pixel, FP_F_Pixel)
+        for i_lout in range(gathered_pixels_fixed.shape[0]):
+            for i_ncoeff in range(gathered_pixels_fixed.shape[1]):
+                current_weight_scalar = reshaped_fixed_weights[i_lout, i_ncoeff, 0]
+                if img_perm_fixed.ndim > 2 :
+                     current_weight_scalar = reshaped_fixed_weights[i_lout, i_ncoeff, 0, 0]
+
+                for other_indices in np.ndindex(gathered_pixels_fixed.shape[2:]):
+                    full_idx_gathered = (i_lout, i_ncoeff) + other_indices
+                    pixel_val_fixed = gathered_pixels_fixed[full_idx_gathered]
+
+                    products_fixed[full_idx_gathered] = fixed_multiply(pixel_val_fixed, current_weight_scalar,
+                                                                       FP_W_Pixel, FP_F_Pixel, FP_F_Pixel, FP_F_Pixel)
 
         interpolated_permuted_fixed_sum = np.sum(products_fixed, axis=1).astype(np.int32)
         for i in np.ndindex(interpolated_permuted_fixed_sum.shape):
@@ -272,8 +304,25 @@ def imresizevec_fixed_point(inimg_uint8, fixed_weights, indices, dim):
         raise ValueError(f"Invalid dimension '{dim}'. Must be 0 or 1.")
 
     # Convert final fixed-point image back to uint8
-    outimg_uint8 = np.zeros(outimg_fixed_final.shape[:2] + (() if inimg_uint8.ndim==2 else (inimg_uint8.shape[2],)), dtype=np.uint8)
-    for i in np.ndindex(outimg_uint8.shape): # Iterate spatial and channel dimensions
+    # Ensure outimg_uint8 has the correct number of channels if input is color
+    final_spatial_shape = outimg_fixed_final.shape[:2]
+    if inimg_uint8.ndim == 3:
+        num_channels = inimg_uint8.shape[2]
+        # Check if outimg_fixed_final has channel dimension, it should from transpose
+        if outimg_fixed_final.ndim != 3 or outimg_fixed_final.shape[2] != num_channels:
+             # This might happen if permute logic or sum axis was not perfectly N-D aware for channels
+             # For now, assume outimg_fixed_final has the correct shape (e.g. 512,512,3)
+             pass # If it's already (H,W,C)
+        target_uint8_shape = final_spatial_shape + (num_channels,)
+    else: # Grayscale
+        target_uint8_shape = final_spatial_shape
+
+    outimg_uint8 = np.zeros(target_uint8_shape, dtype=np.uint8)
+
+    for i in np.ndindex(outimg_fixed_final.shape): # This iterates over all elements of outimg_fixed_final
+        # The index 'i' will match the structure of outimg_fixed_final.
+        # We need to map 'i' to the potentially different structure of outimg_uint8 if channels were squeezed/unsqueezed.
+        # However, if outimg_fixed_final already has the target shape (e.g. 512,512,3), direct indexing is fine.
         float_val = fixed_to_float(outimg_fixed_final[i], FP_F_Pixel)
         outimg_uint8[i] = np.uint8(np.clip(np.round(float_val), 0, 255))
 

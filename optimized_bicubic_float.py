@@ -69,20 +69,20 @@ def contributions(in_length, out_length, scale, kernel, k_width):
     # Index of the leftmost contributing input pixel for each output pixel (0-based)
     left = np.floor(u - kernel_width_eff / 2)
 
-    # Number of taps (coefficients) for the kernel
-    # For bicubic (k_width=4), P is usually 4. The +2 in original was excessive.
-    # Using kernel_width directly for P, or ceil(kernel_width_eff) if it can change.
-    P = int(ceil(kernel_width_eff)) # Number of contributing pixels
+    # Number of taps (coefficients) for the kernel - reverted to original logic for consistency
+    P = int(ceil(kernel_width_eff)) + 2
 
     # Matrix of input pixel indices (0-based) for each output pixel
     # Each row corresponds to an output pixel, columns are contributing input pixel indices
-    ind = np.expand_dims(left, axis=1) + np.arange(P)
+    # Reverted to original logic: ind = left_expanded + np.arange(P) - 1
+    ind = np.expand_dims(left, axis=1) + np.arange(P) - 1
     indices = ind.astype(np.int32)
 
-    # Calculate weights: h(distance from output_pixel_center_in_input_coords to input_pixel_center)
-    # input_pixel_center (1-based) = indices (0-based) + 1
-    # distance = u_expanded - (indices + 1)
-    weights = h(np.expand_dims(u, axis=1) - (indices.astype(np.float64) + 1))
+    # Calculate weights - reverted to original logic for consistency
+    # weights = h(distance from output_pixel_center_in_input_coords to input_pixel_center)
+    # The original formula was: h(np.expand_dims(u, axis=1) - indices.astype(np.float64) - 1)
+    # This implies a specific definition of distance relative to the 0-indexed `indices`.
+    weights = h(np.expand_dims(u, axis=1) - indices.astype(np.float64) - 1)
 
     sum_weights = np.sum(weights, axis=1, keepdims=True)
     weights = np.divide(weights, sum_weights, out=np.zeros_like(weights), where=sum_weights != 0)
@@ -121,47 +121,33 @@ def imresizemex_optimized(inimg, weights, indices, dim):
     # E.g., if inimg is (H,W,C) and dim=0 (H), other_dims are (W,C)
     # if dim=1 (W), other_dims are (H,C)
 
-    # Simpler loop structure for N-D:
-    if inimg_c.ndim == 1: # Should not happen for images
-        for i_out in range(weights.shape[0]):
-            w_row = weights[i_out, :]
-            ind_row = indices[i_out, :]
-            pixel_slice = inimg_c[ind_row]
-            outimg[i_out] = np.sum(pixel_slice * w_row)
-    elif inimg_c.ndim == 2:
-        if dim == 0: # Interpolate along columns (dim 0)
-            for i_col in range(inimg_c.shape[1]):
-                for i_out_row in range(weights.shape[0]):
-                    w = weights[i_out_row, :]
-                    ind = indices[i_out_row, :]
-                    pixel_slice = inimg_c[ind, i_col]
-                    outimg[i_out_row, i_col] = np.sum(pixel_slice * w)
-        elif dim == 1: # Interpolate along rows (dim 1)
-            for i_row in range(inimg_c.shape[0]):
-                for i_out_col in range(weights.shape[0]):
-                    w = weights[i_out_col, :]
-                    ind = indices[i_out_col, :]
-                    pixel_slice = inimg_c[i_row, ind]
-                    outimg[i_row, i_out_col] = np.sum(pixel_slice * w)
-    elif inimg_c.ndim == 3: # H, W, C
-        if dim == 0: # Interpolate along H
-            for i_w in range(inimg_c.shape[1]):
-                for i_c in range(inimg_c.shape[2]):
-                    for i_out_row in range(weights.shape[0]):
-                        w = weights[i_out_row, :]
-                        ind = indices[i_out_row, :]
-                        pixel_slice = inimg_c[ind, i_w, i_c]
-                        outimg[i_out_row, i_w, i_c] = np.sum(pixel_slice * w)
-        elif dim == 1: # Interpolate along W
-             for i_h in range(inimg_c.shape[0]):
-                for i_c in range(inimg_c.shape[2]):
-                    for i_out_col in range(weights.shape[0]):
-                        w = weights[i_out_col, :]
-                        ind = indices[i_out_col, :]
-                        pixel_slice = inimg_c[i_h, ind, i_c]
-                        outimg[i_h, i_out_col, i_c] = np.sum(pixel_slice * w)
+    # Reverting to the exact structure of imresizemex from traditional_bicubic.py
+    # to ensure maximum consistency for org mode comparison.
+    # This version might only correctly handle 2D images directly if not part of a channel iteration.
+    # However, imresize_optimized_float now iterates channels for 3D images, passing 2D slices here.
+    if dim == 0:
+        # Assuming inimg_c is a 2D slice here
+        for i_img_other_dim in range(inimg_c.shape[1]): # Iterate over columns
+            for i_w in range(weights.shape[0]): # Iterate over output rows
+                w = weights[i_w, :]
+                ind = indices[i_w, :]
+                # In traditional, there was a .astype(np.float64) here, but inimg_c is already float64
+                # Also, .squeeze(axis=0) was used, which implies im_slice might have been column vector.
+                # For 2D slice inimg_c[ind, i_img_other_dim] is 1D array if ind is 1D array.
+                im_slice = inimg_c[ind, i_img_other_dim]
+                outimg[i_w, i_img_other_dim] = np.sum(im_slice * w) # Original was np.sum(np.multiply(np.squeeze(im_slice), w.T))
+    elif dim == 1:
+        # Assuming inimg_c is a 2D slice here
+        for i_img_other_dim in range(inimg_c.shape[0]): # Iterate over rows
+            for i_w in range(weights.shape[0]): # Iterate over output columns
+                w = weights[i_w, :]
+                ind = indices[i_w, :]
+                im_slice = inimg_c[i_img_other_dim, ind]
+                outimg[i_img_other_dim, i_w] = np.sum(im_slice * w)
     else:
-        raise ValueError(f"imresizemex_optimized supports up to 3D. Got {inimg_c.ndim}D")
+        # Should not happen if called with 2D slices and dim is 0 or 1
+        raise ValueError(f"imresizemex_optimized received unexpected dim: {dim} for image shape {inimg_c.shape}")
+
 
     if inimg.dtype == np.uint8:
         outimg = np.clip(outimg, 0, 255)
@@ -233,24 +219,55 @@ def imresize_optimized_float(I, scalar_scale=None, method='bicubic_hw_friendly',
     # Calculate weights and indices once, as they are independent of channel values
     weights_all_dims = []
     indices_all_dims = []
+    # Calculate weights once using the shape of the first channel (if color) or the image itself (if grayscale)
+    # This assumes all channels have the same spatial dimensions.
+    ref_shape_for_weights = I.shape[:2] # Use H, W from original image for weight calculation
+
     for k_dim_idx in range(2): # Iterate over the two spatial dimensions
-        dim_size_in = I.shape[k_dim_idx]
+        dim_size_in = ref_shape_for_weights[k_dim_idx] # Use H or W from original image
         dim_size_out = output_size[k_dim_idx]
         dim_scale = scale[k_dim_idx]
         w, ind = contributions(dim_size_in, dim_size_out, dim_scale, kernel, kernel_width)
         weights_all_dims.append(w)
         indices_all_dims.append(ind)
 
-    B = np.copy(I).astype(np.float64) # Work with float64 for precision
+    if I.ndim > 2:
+        num_channels = I.shape[2]
+        B_channels = []
+        for i_chan in range(num_channels):
+            I_channel = I[..., i_chan]
+            B_ch = np.copy(I_channel).astype(np.float64)
+            for k_pass in range(2): # Two passes for separable interpolation
+                dim_to_process = order[k_pass]
+                current_weights = weights_all_dims[dim_to_process]
+                current_indices = indices_all_dims[dim_to_process]
+                # resizeAlongDim_optimized should handle 2D B_ch correctly
+                B_ch = resizeAlongDim_optimized(B_ch, dim_to_process, current_weights, current_indices, mode)
+            B_channels.append(B_ch)
+        B_final = np.stack(B_channels, axis=2)
+    elif I.ndim == 2: # Grayscale image
+        B = np.copy(I).astype(np.float64)
+        # Mimic traditional_bicubic's flag2D behavior: expand, process, squeeze
+        B_expanded = np.expand_dims(B, axis=2) # HxWx1
 
-    for k_pass in range(2): # Two passes for separable interpolation
-        dim_to_process = order[k_pass]
-        current_weights = weights_all_dims[dim_to_process]
-        current_indices = indices_all_dims[dim_to_process]
-        B = resizeAlongDim_optimized(B, dim_to_process, current_weights, current_indices, mode)
+        processed_expanded = B_expanded # Initialize with correct shape for loop
+        for k_pass in range(2):
+            dim_to_process = order[k_pass]
+            current_weights = weights_all_dims[dim_to_process]
+            current_indices = indices_all_dims[dim_to_process]
 
-    # Type conversion back to uint8 if original was uint8 is handled within resizeAlongDim's sub-functions.
-    return B
+            # Pass the 2D slice to resizeAlongDim_optimized, as imresizemex_optimized expects 2D
+            current_slice_2D = np.squeeze(processed_expanded, axis=2)
+            processed_slice_2D = resizeAlongDim_optimized(current_slice_2D, dim_to_process, current_weights, current_indices, mode)
+            processed_expanded = np.expand_dims(processed_slice_2D, axis=2) # Re-expand for next pass or final squeeze
+
+        B_final = np.squeeze(processed_expanded, axis=2)
+    else:
+        raise ValueError(f"Input image must be 2D or 3D, got {I.ndim}D")
+
+    # Type conversion back to uint8 if original was uint8 is handled within resizeAlongDim_optimized's sub-functions.
+    # (which in turn call imresizemex_optimized or imresizevec_optimized that handle it)
+    return B_final
 
 
 if __name__ == '__main__':
