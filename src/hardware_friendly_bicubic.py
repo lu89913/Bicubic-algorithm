@@ -1,22 +1,11 @@
 import numpy as np
 
 # --- Fixed-point parameters ---
-F_BITS = 8  # Number of fractional bits
-F_SCALE = 1 << F_BITS # 256
+F_BITS = 10  # Number of fractional bits
+F_SCALE = 1 << F_BITS # 1024
 
-# Parameters for cubic kernel with a = -0.5
-# All are scaled by F_SCALE
-A_FIXED = int(-0.5 * F_SCALE)  # -128
-A_PLUS_2_FIXED = int(1.5 * F_SCALE) # 384 (a+2)
-A_PLUS_3_FIXED = int(2.5 * F_SCALE) # 640 (a+3)
-
-# Coefficients for the second segment (1 < x <= 2) when a = -0.5
-# a * x^3 - 5a * x^2 + 8a * x - 4a
-# -0.5 * x^3 + 2.5 * x^2 - 4 * x + 2
-COEFF_X3_S2 = A_FIXED                 # -0.5 -> -128
-COEFF_X2_S2 = int(2.5 * F_SCALE)      #  2.5 ->  640
-COEFF_X1_S2 = int(-4.0 * F_SCALE)     # -4.0 -> -1024
-COEFF_C_S2  = int(2.0 * F_SCALE)      #  2.0 ->  512
+# Parameters for cubic kernel will now be calculated dynamically based on 'a'
+# inside cubic_kernel_fixed_point or passed to it.
 
 def fixed_round_shift(value, shift_bits):
     """Rounds to nearest, then shifts right. Equivalent to round(value / (2**shift_bits))."""
@@ -25,78 +14,156 @@ def fixed_round_shift(value, shift_bits):
     rounding_val = 1 << (shift_bits - 1)
     return (value + rounding_val) >> shift_bits
 
-def cubic_kernel_fixed_point(x_fixed_q2_f): # Input x is Q2.F_BITS (abs value)
+def cubic_kernel_fixed_point(x_fixed_q2_f, a_float): # Input x is Q2.F_BITS (abs value), a_float is float
     """
     Computes the bicubic kernel weights using fixed-point arithmetic.
     x_fixed_q2_f: Absolute distance from the sample point, in Q2.F_BITS format.
-                  (e.g., if F_BITS=8, 0.0 is 0, 1.0 is 256, 2.0 is 512)
-    Returns kernel weight in QsX.F_BITS format (internal calculations might need more bits).
-    Let's aim for output as Qs4.F_BITS (signed, 4 integer, F_BITS fractional)
-    Intermediate precision for x^2, x^3:
-    x (Q2.F) -> x^2 (Q4.2F) -> x^3 (Q6.3F)
-    We need to shift them back to QX.F before multiplying with coefficients (which are QsY.F)
-    Or, multiply first then shift the larger product.
-    Example: (coeff_qX.F * x_cubed_q6.3F) -> Q(X+6).(4F) -> Shift by 3F to get Q(X+6).F
+    a_float: The 'a' parameter for the cubic kernel (float, e.g., -0.5, -0.75).
+    Returns kernel weight in QsX.F_BITS format.
     """
-    # Ensure x_fixed is within expected range for kernel calculation [0, 2*F_SCALE)
-    # x_fixed represents values from 0 up to (but not including) 2.0
+
+    # Calculate fixed-point coefficients based on a_float
+    # These coefficients are multiplied by powers of x.
+    # If x is Q2.F, x^2 is Q4.2F, x^3 is Q6.3F.
+    # Coefficients should be scaled by F_SCALE to be QsY.F.
+    # Product (Coeff * x^n) will have F_SCALE * F_SCALE_Corrected_For_xN_extra_F_BITS
+    # We will need to shift result back.
+
+    # For segment 0 <= |x| <= 1: (a+2)|x|^3 - (a+3)|x|^2 + 1
+    # Coeff1_s1_fixed = (a+2) * F_SCALE
+    # Coeff2_s1_fixed = -(a+3) * F_SCALE (negative sign included)
+    # Coeff3_s1_fixed = 1 * F_SCALE (this is the constant term)
     
-    # x_fixed is Q2.F (e.g. range 0 to 511 for F_BITS=8)
-    # x_sq_fixed will be Q4.2F
-    # x_cub_fixed will be Q6.3F
-    x_sq_fixed = (x_fixed_q2_f * x_fixed_q2_f) 
-    x_cub_fixed = (x_sq_fixed * x_fixed_q2_f)
+    # For segment 1 < |x| <= 2: a|x|^3 - 5a|x|^2 + 8a|x| - 4a
+    # Coeff1_s2_fixed = a * F_SCALE
+    # Coeff2_s2_fixed = -5a * F_SCALE
+    # Coeff3_s2_fixed = 8a * F_SCALE
+    # Coeff4_s2_fixed = -4a * F_SCALE
 
-    # Branch 1: 0 <= x < 1 (i.e., 0 <= x_fixed < F_SCALE)
-    if x_fixed_q2_f < F_SCALE:
-        # Formula: (a+2)x^3 - (a+3)x^2 + 1
-        # (A_PLUS_2_FIXED * x^3) - (A_PLUS_3_FIXED * x^2) + 1*F_SCALE*F_SCALE*F_SCALE (approx)
-        # Branch 1: 0 <= x < 1 (i.e., 0 <= x_fixed < F_SCALE)
-        # Formula: 1.5 * x^3 - 2.5 * x^2 + 1
-        
-        # Scale x_cub_fixed (Q6.3F) and x_sq_fixed (Q4.2F) to QX.F for operations
-        x_cub_qX_f = fixed_round_shift(x_cub_fixed, 2 * F_BITS) # Now Q6.F (approx)
-        x_sq_qX_f  = fixed_round_shift(x_sq_fixed, F_BITS)    # Now Q4.F (approx)
+    # Let's pre-calculate these for clarity and potential optimization later
+    # These are QsY.F format (Y depends on magnitude of 'a')
+    a_plus_2_fixed = int(round((a_float + 2.0) * F_SCALE))
+    a_plus_3_fixed = int(round((a_float + 3.0) * F_SCALE)) # Note: formula uses -(a+3)
+    a_fixed        = int(round(a_float * F_SCALE))
+    neg_5a_fixed   = int(round(-5.0 * a_float * F_SCALE))
+    pos_8a_fixed   = int(round(8.0 * a_float * F_SCALE))
+    neg_4a_fixed   = int(round(-4.0 * a_float * F_SCALE))
 
-        # Term 1: 1.5 * x^3 = x^3 + (x^3 >> 1)
-        term1 = x_cub_qX_f + fixed_round_shift(x_cub_qX_f, 1)
-        
-        # Term 2: 2.5 * x^2 = (x^2 << 1) + (x^2 >> 1)
-        term2 = (x_sq_qX_f << 1) + fixed_round_shift(x_sq_qX_f, 1)
-        
-        # Constant 1, represented as QX.F (e.g. 1.0 * F_SCALE)
-        one_fixed_qX_f = 1 * F_SCALE
-        
-        result_fixed = term1 - term2 + one_fixed_qX_f
+    one_fixed_scaled_appropriately = 1 * F_SCALE # This will be used as Q.F for addition
 
-    # Branch 2: 1 <= x < 2 (i.e., F_SCALE <= x_fixed < 2*F_SCALE)
-    elif x_fixed_q2_f < 2 * F_SCALE:
-        # Formula for a=-0.5: -0.5*x^3 + 2.5*x^2 - 4*x + 2
-        
-        x_cub_qX_f = fixed_round_shift(x_cub_fixed, 2 * F_BITS) # Q6.F
-        x_sq_qX_f  = fixed_round_shift(x_sq_fixed, F_BITS)    # Q4.F
-        x_qX_f     = x_fixed_q2_f # Q2.F (already appropriately scaled for this context if F_BITS is the common scale)
+    # x_fixed_q2_f is Q2.F (e.g. range 0 to 511 for F_BITS=8, representing 0 to almost 2.0)
+    x_sq_fixed_q4_2f = (x_fixed_q2_f * x_fixed_q2_f)
+    x_cub_fixed_q6_3f = (x_sq_fixed_q4_2f * x_fixed_q2_f)
 
-        # Term x3: -0.5 * x^3 = -(x^3 >> 1)
-        t_x3 = -fixed_round_shift(x_cub_qX_f, 1)
-        
-        # Term x2: 2.5 * x^2 = (x^2 << 1) + (x^2 >> 1)
-        t_x2 = (x_sq_qX_f << 1) + fixed_round_shift(x_sq_qX_f, 1)
-        
-        # Term x1: -4 * x = -(x << 2)
-        t_x1 = -(x_qX_f << 2)
-        
-        # Term c: +2
-        t_c = 2 * F_SCALE
-        
-        result_fixed = t_x3 + t_x2 + t_x1 + t_c
+    # Result will be accumulated. We need to ensure terms are scaled consistently before summing.
+    # Each term: Coeff_QY.F * x_power_QX.nF -> Q(Y+X).( (n+1)F )
+    # We need to shift by nF to get Q(Y+X).F
+    # Example: a_plus_2_fixed (QsY.F) * x_cub_fixed (Q6.3F)
+    # Product is Q(Y+6).4F. Shift right by 3*F_BITS to get Q(Y+6).F for accumulation.
+
+    result_fixed = 0
+    one_fixed_qX_f = 1 * F_SCALE # Constant 1.0 in Q.F
+
+    # x_cub_qX_f will be x^3 scaled to QX.F (e.g., Q6.F by shifting x_cub_fixed_q6_3f by 2*F_BITS)
+    # x_sq_qX_f will be x^2 scaled to QX.F (e.g., Q4.F by shifting x_sq_fixed_q4_2f by F_BITS)
+    # x_qX_f is x scaled to QX.F (e.g., Q2.F, which is x_fixed_q2_f itself)
+
+    if a_float == -0.5:
+        if x_fixed_q2_f < F_SCALE: # 0 <= |x| < 1
+            x_cub_scaled = fixed_round_shift(x_cub_fixed_q6_3f, 2 * F_BITS)
+            x_sq_scaled  = fixed_round_shift(x_sq_fixed_q4_2f, F_BITS)
+            term1 = x_cub_scaled + fixed_round_shift(x_cub_scaled, 1) # 1.5 * x^3
+            term2 = (x_sq_scaled << 1) + fixed_round_shift(x_sq_scaled, 1) # 2.5 * x^2
+            result_fixed = term1 - term2 + one_fixed_qX_f
+        elif x_fixed_q2_f < 2 * F_SCALE: # 1 <= |x| < 2
+            x_cub_scaled = fixed_round_shift(x_cub_fixed_q6_3f, 2 * F_BITS)
+            x_sq_scaled  = fixed_round_shift(x_sq_fixed_q4_2f, F_BITS)
+            x_scaled     = x_fixed_q2_f
+            t_x3 = -fixed_round_shift(x_cub_scaled, 1) # -0.5 * x^3
+            t_x2 = (x_sq_scaled << 1) + fixed_round_shift(x_sq_scaled, 1) # 2.5 * x^2
+            t_x1 = -(x_scaled << 2) # -4 * x
+            t_c = 2 * F_SCALE # +2
+            result_fixed = t_x3 + t_x2 + t_x1 + t_c
+        else: # |x| >= 2
+            result_fixed = 0
+
+    elif a_float == -0.75:
+        if x_fixed_q2_f < F_SCALE: # 0 <= |x| < 1
+            # (a+2)|x|^3 - (a+3)|x|^2 + 1  =>  1.25*|x|^3 - 2.25*|x|^2 + 1
+            x_cub_scaled = fixed_round_shift(x_cub_fixed_q6_3f, 2 * F_BITS)
+            x_sq_scaled  = fixed_round_shift(x_sq_fixed_q4_2f, F_BITS)
+            term1 = x_cub_scaled + fixed_round_shift(x_cub_scaled, 2) # 1.25 * x^3
+            term2 = (x_sq_scaled << 1) + fixed_round_shift(x_sq_scaled, 2) # 2.25 * x^2
+            result_fixed = term1 - term2 + one_fixed_qX_f
+        elif x_fixed_q2_f < 2 * F_SCALE: # 1 <= |x| < 2
+            # a|x|^3 - 5a|x|^2 + 8a|x| - 4a  =>  -0.75|x|^3 + 3.75|x|^2 - 6|x| + 3
+            x_cub_scaled = fixed_round_shift(x_cub_fixed_q6_3f, 2 * F_BITS)
+            x_sq_scaled  = fixed_round_shift(x_sq_fixed_q4_2f, F_BITS)
+            x_scaled     = x_fixed_q2_f
+
+            # -0.75*x^3 = -(x^3 - (x^3>>2))
+            t_x3 = -(x_cub_scaled - fixed_round_shift(x_cub_scaled, 2))
+            # 3.75*x^2 = (x^2<<2) - (x^2>>2)
+            t_x2 = (x_sq_scaled << 2) - fixed_round_shift(x_sq_scaled, 2)
+            # -6*x = -((x<<2) + (x<<1))
+            t_x1 = -((x_scaled << 2) + (x_scaled << 1))
+            # +3
+            t_c = 3 * F_SCALE
+            result_fixed = t_x3 + t_x2 + t_x1 + t_c
+        else: # |x| >= 2
+            result_fixed = 0
+
+    elif a_float == -1.0:
+        if x_fixed_q2_f < F_SCALE: # 0 <= |x| < 1
+            # (a+2)|x|^3 - (a+3)|x|^2 + 1  =>  1*|x|^3 - 2*|x|^2 + 1
+            x_cub_scaled = fixed_round_shift(x_cub_fixed_q6_3f, 2 * F_BITS)
+            x_sq_scaled  = fixed_round_shift(x_sq_fixed_q4_2f, F_BITS)
+            term1 = x_cub_scaled # 1 * x^3
+            term2 = (x_sq_scaled << 1) # 2 * x^2
+            result_fixed = term1 - term2 + one_fixed_qX_f
+        elif x_fixed_q2_f < 2 * F_SCALE: # 1 <= |x| < 2
+            # a|x|^3 - 5a|x|^2 + 8a|x| - 4a  =>  -1*|x|^3 + 5*|x|^2 - 8|x| + 4
+            x_cub_scaled = fixed_round_shift(x_cub_fixed_q6_3f, 2 * F_BITS)
+            x_sq_scaled  = fixed_round_shift(x_sq_fixed_q4_2f, F_BITS)
+            x_scaled     = x_fixed_q2_f
+
+            t_x3 = -x_cub_scaled # -1 * x^3
+            t_x2 = (x_sq_scaled << 2) + x_sq_scaled # 5 * x^2
+            t_x1 = -(x_scaled << 3) # -8 * x
+            t_c = 4 * F_SCALE # +4
+            result_fixed = t_x3 + t_x2 + t_x1 + t_c
+        else: # |x| >= 2
+            result_fixed = 0
     else:
-        # x >= 2
-        result_fixed = 0
+        # Generic implementation using calculated fixed-point coefficients for other 'a' values
+        a_plus_2_fixed = int(round((a_float + 2.0) * F_SCALE))
+        a_plus_3_fixed = int(round((a_float + 3.0) * F_SCALE))
+        a_fixed        = int(round(a_float * F_SCALE))
+        neg_5a_fixed   = int(round(-5.0 * a_float * F_SCALE))
+        pos_8a_fixed   = int(round(8.0 * a_float * F_SCALE))
+        neg_4a_fixed   = int(round(-4.0 * a_float * F_SCALE))
 
-    return int(result_fixed) # Ensure integer result for fixed point representation
+        if x_fixed_q2_f < F_SCALE: # 0 <= |x| < 1
+            term1_x3 = a_plus_2_fixed * x_cub_fixed_q6_3f
+            term1_x3_scaled = fixed_round_shift(term1_x3, 3 * F_BITS)
+            term2_x2 = a_plus_3_fixed * x_sq_fixed_q4_2f
+            term2_x2_scaled = fixed_round_shift(term2_x2, 2 * F_BITS)
+            result_fixed = term1_x3_scaled - term2_x2_scaled + one_fixed_qX_f
+        elif x_fixed_q2_f < 2 * F_SCALE: # 1 <= |x| < 2
+            term1_s2_x3 = a_fixed * x_cub_fixed_q6_3f
+            term1_s2_x3_scaled = fixed_round_shift(term1_s2_x3, 3 * F_BITS)
+            term2_s2_x2 = neg_5a_fixed * x_sq_fixed_q4_2f
+            term2_s2_x2_scaled = fixed_round_shift(term2_s2_x2, 2 * F_BITS)
+            term3_s2_x1 = pos_8a_fixed * x_fixed_q2_f
+            term3_s2_x1_scaled = fixed_round_shift(term3_s2_x1, 1 * F_BITS)
+            term4_s2_c = neg_4a_fixed
+            result_fixed = term1_s2_x3_scaled + term2_s2_x2_scaled + term3_s2_x1_scaled + term4_s2_c
+        else: # |x| >= 2
+            result_fixed = 0
 
-def bicubic_interpolation_pixel_fixed_point(p_uint8, tx_fixed_q0_f, ty_fixed_q0_f):
+    return int(result_fixed) # Ensure integer result for fixed point representation, QsX.F
+
+def bicubic_interpolation_pixel_fixed_point(p_uint8, tx_fixed_q0_f, ty_fixed_q0_f, a_float): # Add a_float
     """
     Performs bicubic interpolation for a single pixel using fixed-point arithmetic.
     p_uint8 (np.ndarray): A 4x4 numpy array of neighboring pixel values (uint8).
@@ -122,40 +189,36 @@ def bicubic_interpolation_pixel_fixed_point(p_uint8, tx_fixed_q0_f, ty_fixed_q0_
     # d3 = 2-tx  -> 2*F_SCALE - tx_fixed_q0_f(range F_SCALE+1 to 2*F_SCALE, Q2.F)
     
     # Note: kernel function takes abs distance. Here, these are already positive distances.
-    wx_fixed = np.array([
-        cubic_kernel_fixed_point(F_SCALE + tx_fixed_q0_f), # 1+tx
-        cubic_kernel_fixed_point(tx_fixed_q0_f),           # tx
-        cubic_kernel_fixed_point(F_SCALE - tx_fixed_q0_f), # 1-tx
-        cubic_kernel_fixed_point(2 * F_SCALE - tx_fixed_q0_f)  # 2-tx (this was error in logic, should be abs(x-(idx)) )
-    ])
+    # The previous wx_fixed block had an error in the comment and was missing a_float.
+    # Corrected calls below.
     
     # Corrected distances for kernel (kernel input is |coord_diff|):
-    # For wx, the 4 relevant grid points are at x = -1, 0, 1, 2
+    # For wx, the 4 relevant grid points are at x = -1, 0, 1, 2 relative to the integer part of input coord.
     # Interpolation point is at x_int + tx.
-    # Distances are | (x_int + tx) - x_grid |
-    # wx[0] corresponds to grid point at -1. Distance = |tx - (-1)| = |tx + 1| = 1+tx
+    # Distances are | (x_int + tx) - (x_int + grid_offset) | = |tx - grid_offset|
+    # wx[0] corresponds to grid point at -1. Distance = |tx - (-1)| = |tx + 1| = 1+tx (since tx >=0)
     # wx[1] corresponds to grid point at  0. Distance = |tx - 0|   = |tx|     = tx
     # wx[2] corresponds to grid point at  1. Distance = |tx - 1|   = 1-tx (since 0<=tx<1)
     # wx[3] corresponds to grid point at  2. Distance = |tx - 2|   = 2-tx (since 0<=tx<1)
     
-    # These map to the x_fixed_q2_f inputs:
-    # For wx[0]: kernel_arg = F_SCALE + tx_fixed_q0_f (for distance 1+tx)
-    # For wx[1]: kernel_arg = tx_fixed_q0_f           (for distance tx)
-    # For wx[2]: kernel_arg = F_SCALE - tx_fixed_q0_f (for distance 1-tx)
-    # For wx[3]: kernel_arg = 2*F_SCALE - tx_fixed_q0_f if using 2-tx, or F_SCALE + (F_SCALE - tx_fixed_q0_f)
-    # Let's re-verify kernel arguments for wx:
-    # Kernel argument is distance. For indices i = -1, 0, 1, 2 for the 4x4 patch.
-    # wx[0] = w(1+tx)
-    # wx[1] = w(tx)
-    # wx[2] = w(1-tx)
-    # wx[3] = w(2-tx)
-    # This seems correct.
+    # These map to the x_fixed_q2_f inputs for cubic_kernel_fixed_point:
+    # kernel_arg for wx[0]: F_SCALE + tx_fixed_q0_f (representing 1+tx)
+    # kernel_arg for wx[1]: tx_fixed_q0_f           (representing tx)
+    # kernel_arg for wx[2]: F_SCALE - tx_fixed_q0_f (representing 1-tx)
+    # kernel_arg for wx[3]: 2*F_SCALE - tx_fixed_q0_f (representing 2-tx)
+
+    wx_fixed = np.array([
+        cubic_kernel_fixed_point(F_SCALE + tx_fixed_q0_f, a_float),
+        cubic_kernel_fixed_point(tx_fixed_q0_f, a_float),
+        cubic_kernel_fixed_point(F_SCALE - tx_fixed_q0_f, a_float),
+        cubic_kernel_fixed_point(2 * F_SCALE - tx_fixed_q0_f, a_float)
+    ])
 
     wy_fixed = np.array([
-        cubic_kernel_fixed_point(F_SCALE + ty_fixed_q0_f), # 1+ty
-        cubic_kernel_fixed_point(ty_fixed_q0_f),           # ty
-        cubic_kernel_fixed_point(F_SCALE - ty_fixed_q0_f), # 1-ty
-        cubic_kernel_fixed_point(2 * F_SCALE - ty_fixed_q0_f)  # 2-ty
+        cubic_kernel_fixed_point(F_SCALE + ty_fixed_q0_f, a_float),
+        cubic_kernel_fixed_point(ty_fixed_q0_f, a_float),
+        cubic_kernel_fixed_point(F_SCALE - ty_fixed_q0_f, a_float),
+        cubic_kernel_fixed_point(2 * F_SCALE - ty_fixed_q0_f, a_float)
     ])
 
     # Weights wx_fixed, wy_fixed are QsX.F_BITS (e.g. Qs4.8)
@@ -199,13 +262,14 @@ def bicubic_interpolation_pixel_fixed_point(p_uint8, tx_fixed_q0_f, ty_fixed_q0_
         
     return int(interpolated_value_scaled)
 
-def bicubic_resize_fixed_point(image_uint8, scale_factor_x, scale_factor_y):
+def bicubic_resize_fixed_point(image_uint8, scale_factor_x, scale_factor_y, a_float=-0.5): # Add a_float
     """
     Resizes an image using fixed-point bicubic interpolation.
     Args:
         image_uint8 (np.ndarray): Input image (grayscale, 2D numpy array, dtype=np.uint8).
         scale_factor_x (float): Scaling factor for x-axis.
         scale_factor_y (float): Scaling factor for y-axis.
+        a_float (float): The 'a' parameter for the cubic kernel.
     Returns:
         np.ndarray: Resized image (dtype=np.uint8).
     """
@@ -242,7 +306,7 @@ def bicubic_resize_fixed_point(image_uint8, scale_factor_x, scale_factor_y):
             p_uint8 = padded_image[y_int + 1 : y_int + 1 + 4,
                                    x_int + 1 : x_int + 1 + 4]
             
-            interpolated_val_uint8 = bicubic_interpolation_pixel_fixed_point(p_uint8, tx_fixed, ty_fixed)
+            interpolated_val_uint8 = bicubic_interpolation_pixel_fixed_point(p_uint8, tx_fixed, ty_fixed, a_float) # Pass a_float
             output_image[j_out, i_out] = interpolated_val_uint8
                 
     return output_image
@@ -259,14 +323,15 @@ if __name__ == '__main__':
     print("Original Image (Fixed-Point Test):\n", original_image)
     scale_x = 1.5
     scale_y = 1.5
+    a_test_val = -0.5 # For main block testing, use default a
     
-    resized_image_fixed = bicubic_resize_fixed_point(original_image, scale_x, scale_y)
-    print(f"\nResized Image Fixed-Point (scale {scale_x}x{scale_y}):\n", resized_image_fixed)
+    resized_image_fixed = bicubic_resize_fixed_point(original_image, scale_x, scale_y, a_float=a_test_val)
+    print(f"\nResized Image Fixed-Point (scale {scale_x}x{scale_y}, a={a_test_val}):\n", resized_image_fixed)
     print("Output shape:", resized_image_fixed.shape)
 
     # Compare with traditional float for this small case
     from traditional_bicubic import bicubic_resize as bicubic_resize_float
-    resized_image_float = bicubic_resize_float(original_image, scale_x, scale_y)
+    resized_image_float = bicubic_resize_float(original_image, scale_x, scale_y, a=a_test_val)
     print(f"\nResized Image Float (for comparison):\n", resized_image_float)
     
     mse = np.mean((resized_image_fixed.astype(np.float64) - resized_image_float.astype(np.float64))**2)
@@ -279,11 +344,11 @@ if __name__ == '__main__':
         grad_img_np = np.array(grad_img_pil, dtype=np.uint8)
         
         print("\n--- Gradient Image Test ---")
-        resized_grad_fixed = bicubic_resize_fixed_point(grad_img_np, scale_x, scale_y)
-        resized_grad_float = bicubic_resize_float(grad_img_np, scale_x, scale_y)
+        resized_grad_fixed = bicubic_resize_fixed_point(grad_img_np, scale_x, scale_y, a_float=a_test_val)
+        resized_grad_float = bicubic_resize_float(grad_img_np, scale_x, scale_y, a=a_test_val)
         
         mse_grad = np.mean((resized_grad_fixed.astype(np.float64) - resized_grad_float.astype(np.float64))**2)
-        print(f"Resized Gradient Fixed shape: {resized_grad_fixed.shape}")
+        print(f"Resized Gradient Fixed shape: {resized_grad_fixed.shape} (a={a_test_val})")
         print(f"Resized Gradient Float shape: {resized_grad_float.shape}")
         print(f"MSE between fixed-point and float for gradient image: {mse_grad:.4f}")
         if mse_grad == 0: psnr_grad = float('inf')
