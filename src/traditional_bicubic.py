@@ -77,9 +77,10 @@ def bicubic_resize(image, scale_factor_x, scale_factor_y, a=-0.5): # 'a' is alre
     
     output_image = np.zeros((out_height, out_width), dtype=image.dtype)
 
-    # Pad the input image to handle boundaries using reflection
+    # Pad the input image to handle boundaries.
+    # Changed from 'reflect' to 'edge' to try and match MATLAB's 'replicate' behavior.
     # We need 2 pixels of padding on each side for a 4x4 kernel
-    padded_image = np.pad(image, pad_width=2, mode='reflect')
+    padded_image = np.pad(image, pad_width=2, mode='edge')
 
     for j_out in range(out_height): # y_out
         for i_out in range(out_width): # x_out
