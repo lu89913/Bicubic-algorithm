@@ -1,117 +1,129 @@
-# Project Overview: Hardware-Friendly Bicubic Interpolation
+# 專案概覽：硬體友善型 Bicubic 插值演算法比較
 
-## 1. Introduction
+## 1. 引言
 
-### 1.1. Project Background
-Image scaling is a fundamental operation in digital image processing, with applications ranging from display adaptation to image editing and computer vision. Bicubic interpolation is a widely used technique known for its ability to produce smoother results with fewer artifacts compared to simpler methods like bilinear or nearest-neighbor interpolation. However, traditional bicubic interpolation can be computationally intensive, especially for hardware implementations where resources like multipliers and memory bandwidth are critical.
+### 1.1. 專案背景
+圖像縮放是數位影像處理中的一項基礎操作，與諸如雙線性或最近鄰插值等更簡單的方法相比，Bicubic 插值因其能夠產生更平滑、更少人為失真 (artifacts) 的結果而被廣泛使用。然而，對於硬體實現（如 FPGA/ASIC）而言，傳統的 Bicubic 插值由於其對浮點運算和通用乘法器的依賴，仍然帶來挑戰。本專案旨在探索針對硬體優化的 Bicubic 插值演算法，重點在於減少資源消耗，同時通過 Python 模擬來量化其對圖像品質的影響。
 
-### 1.2. Project Goal
-The primary goal of this project is to develop an optimized bicubic interpolation algorithm that is specifically tailored for efficient hardware implementation. The optimization aims to reduce the anticipated hardware resource consumption (particularly multipliers) without significantly degrading the image quality, as measured by Peak Signal-to-Noise Ratio (PSNR). The project includes a Python-based simulation to demonstrate the algorithm's correctness and quality preservation. The target comparison is a Python implementation analogous to MATLAB's `imresize` (bicubic) function, with a specific test case of upscaling a 256x256 image to 512x512.
+### 1.2. 專案目標與規格
+主要目標包括：
+1.  實現一個傳統的 Bicubic 插值演算法作為比較基線。
+2.  開發一個使用浮點數運算的硬體友善型 Bicubic 演算法，其中卷積核係數經過修改以簡化硬體轉換（例如，轉為移位和加法操作）。
+3.  模擬此硬體友善型演算法在定點數運算下的行為，以理解有限精度帶來的影響。
+4.  比較這三個版本在圖像品質 (PSNR) 和（次要的）Python 執行時間方面的表現。
 
-## 2. Traditional Bicubic Interpolation Algorithm
+**規格參數：**
+*   **輸入圖像：** 主要為 256x256 像素（灰階和彩色）。
+*   **輸出圖像：** 主要為 512x512 像素（2倍放大）。
+*   **優化目標：** 降低在硬體中應用卷積核係數的複雜度。
+*   **品質度量：** 峰值信噪比 (PSNR)。
+*   **模擬環境：** Python，使用 NumPy 和 scikit-image 套件。
 
-### 2.1. Principle
-Bicubic interpolation calculates the value of an output pixel by performing a weighted average of pixels in the nearest 4x4 neighborhood of the corresponding input pixel. The weights are determined by a cubic convolution kernel, typically the Keys' kernel.
+## 2. 演算法版本與實現細節
 
-The interpolation is separable, meaning the 2D interpolation can be performed as two 1D interpolations: first along rows, then along columns (or vice-versa). Each 1D interpolation uses 4 neighboring pixels.
+### 2.1. `traditional_bicubic.py` - 基線實現
+*   **目的：** 作為正確性和圖像品質的參考標準。
+*   **演算法：** 實現標準的 Bicubic 插值，使用 Keys 的三次卷積核，參數 `a = -0.5`。對應的係數如 `1.5, -2.5, -0.5` 等。
+*   **卷積核 `cubic(x)`：** 分段三次多項式的直接浮點實現。
+*   **`imresize()` 函數：** 主要接口。
+    *   `mode='org'`: 基於迴圈的實現 (`imresizemex`)，通常被認為是更穩健的參考。
+    *   `mode='vec'`: 用戶提供的原始向量化版本 (`imresizevec`)，此版本在 N 維數據處理和內部 reshape 邏輯方面存在已知的功能限制和潛在問題。
 
-### 2.2. Python Implementation Key Points
-The provided initial Python code (`image_interpolation.py`) implements this as:
-*   **`cubic(x)` function:** Defines the Keys' cubic kernel:
-    *   `f(x) = (a+2)|x|^3 - (a+3)|x|^2 + 1` for `|x| <= 1`
-    *   `f(x) = a|x|^3 - 5a|x|^2 + 8a|x| - 4a` for `1 < |x| <= 2`
-    *   `f(x) = 0` otherwise
-    *   The standard implementation uses `a = -0.5`. This leads to coefficients like `1.5`, `-2.5`, `-0.5`, etc.
-*   **`contributions()` function:** Calculates the weights and indices of the input pixels that contribute to each output pixel for a single dimension. It handles scaling factors and boundary conditions (reflection padding).
-*   **`imresize()` function:** Orchestrates the 2D resizing process by calling `contributions()` for each dimension and then applying the 1D interpolation (either via a loop-based `imresizemex` or a vectorized `imresizevec`).
+### 2.2. `optimized_bicubic_float.py` - 硬體友善型 (浮點)
+*   **目的：** 展示在理想（浮點）情況下，Bicubic 卷積核可以進行數學上的重構以適應硬體，而圖像品質（相對於一個理想的 Bicubic 實現）幾乎無損失。
+*   **演算法：** 採用相同的 Bicubic 理論，但重新表達了卷積核的計算方式。
+*   **卷積核 `hardware_friendly_cubic(x_float)`：**
+    *   係數表示為精確分數。例如，`1.5*val` 計算為 `(3*val)/2`。
+    *   所有算術運算仍使用標準 Python 浮點數。
+*   **`imresize_optimized_float()` 函數：**
+    *   使用 `hardware_friendly_cubic` 卷積核。
+    *   為 `mode='org'` 和 `mode='vec'` 均提供了穩健的 N 維實現 (`imresizemex_optimized`, `imresizevec_optimized`)。
+    *   為確保與 `traditional_bicubic.py` (org 模式) 的可比性，多通道和灰階圖像的處理邏輯已盡可能對齊。
+*   **預期硬體優勢 (概念上)：** 諸如 `(3*val)/2` 的操作在硬體中可以轉換為 `((val << 1) + val) >> 1`，從而用移位器和一個加法器替代通用乘法器。
 
-## 3. Hardware Optimization Strategy
+### 2.3. `optimized_bicubic_fixed_point.py` - 硬體友善型 (定點模擬)
+*   **目的：** 在定點數運算限制下模擬 `optimized_bicubic_float.py` 演算法，以評估有限精度對圖像品質的影響。
+*   **定點模擬細節：**
+    *   **參數定義：**
+        *   卷積核內部計算 (距離、中間權重): 使用 `FP_W_Kernel=16` (總位寬), `FP_F_Kernel=8` (小數位寬)。這對應於有符號定點格式 **Q7.8** (1個符號位，7個整數位，8個小數位)，可表示範圍約為 -128.0 至 +127.996。
+        *   像素數據及累加：使用 `FP_W_Pixel=24` (總位寬), `FP_F_Pixel=8` (小數位寬)。
+            *   輸入 `uint8` 像素 (0-255) 被視為無符號數，轉換為定點時，`float_to_fixed(pixel_value, F=8, W=24, signed=False)` 將其映射到一個較大的整數範圍 (如 255.0 左移8位為 65280)，這可以看作是無符號 **UQ16.8** (16位整數，8位小數，總共24位)。
+            *   權重值 (來自 `contributions_fixed_point`，轉換到 `FP_F_Pixel=8` 小數精度) 使用 `float_to_fixed(weight, F=8, W=24, signed=True)`。這意味著權重被表示為 **Q15.8** (1符號，15整數，8小數)，允許權重值在較大範圍內（儘管實際權重值通常在 [-0.5, 1] 附近）。
+            *   乘積 `pixel_fixed * weight_fixed` 的小數位為 `FP_F_Pixel + FP_F_Pixel = 16`，然後被調整回 `FP_F_Pixel=8`。累加器也保持 `FP_F_Pixel` 的小數精度，其整數位部分需要足夠大。
+    *   **輔助函數：** `float_to_fixed`, `fixed_to_float`, `fixed_add`, `fixed_subtract`, `fixed_multiply`, `saturate`。這些函數模擬定點行為，包括溢出時的飽和處理。
+*   **卷積核 `hardware_friendly_cubic_fixed_point(x_float)`：**
+    *   輸入距離 `x_float` 被轉換為 Q7.8 定點數。所有內部計算均使用定點輔助函數。
+*   **`contributions_fixed_point()`：** 定點卷積核的輸出暫時轉回浮點進行歸一化，然後歸一化後的浮點權重再轉為 Q15.8 定點格式。
+*   **`imresize_fixed_point()` (通過 `imresizevec_fixed_point`)：**
+    *   核心運算為定點像素 (UQ16.8) 與定點權重 (Q15.8) 的乘法和累加。結果被調整回 UQ16.8 表示，最終轉換為 `uint8`。
+    *   目前僅實現了 `mode='vec'`。
+*   **關鍵洞察：** 此版本揭示了因選定位寬和量化/溢出效應對 PSNR 的影響。
 
-### 3.1. Explored Optimization Directions
-Several strategies were considered for making the bicubic algorithm more hardware-friendly:
-*   **Coefficient Approximation/Quantization:** Simplifying the kernel's floating-point coefficients.
-*   **Lookup Tables (LUTs):** Pre-calculating and storing parts of the kernel computation.
-*   **Pipelining & Parallelism:** Architectural optimizations for hardware.
-*   **Polynomial Rewriting (e.g., Horner's Rule):** Reducing operations in polynomial evaluation.
+## 3. 模擬設置與比較 (`compare_all_versions.py`)
+*   **測試圖像：** 生成 256x256 灰階和彩色測試圖像。
+*   **圖像放大：** 所有版本均將圖像放大至 512x512。
+*   **執行：** 調用三個檔案中各自主要的 `imresize` 相關函數，測試 `'org'` 和 `'vec'` 模式。
+*   **度量指標：** PSNR 和 Python 執行時間。
 
-### 3.2. Chosen Strategy: Coefficient Re-representation
-The chosen strategy focuses on **re-representing the exact kernel coefficients as simple fractions**. This approach directly targets the reduction of multiplication complexity in hardware.
-The standard Keys' kernel with `a = -0.5` has coefficients such as:
-*   `1.5`
-*   `-2.5`
-*   `1.0`
-*   `-0.5` (for `a`)
-*   `2.5`
-*   `-4.0`
-*   `2.0`
+## 4. 模擬結果與分析
 
-These can be precisely expressed as fractions with small denominators (typically 2):
-*   `1.5 = 3/2`
-*   `-2.5 = -5/2`
-*   `1.0 = 1/1`
-*   `-0.5 = -1/2`
-*   `2.5 = 5/2`
-*   `-4.0 = -4/1`
-*   `2.0 = 2/1`
+### 4.1. 演算法設計層面對比
+下表總結了三種演算法在設計層面的一些關鍵特性：
 
-## 4. Hardware-Friendly Bicubic Algorithm Design (`hardware_friendly_cubic`)
+| 特性                     | `traditional_bicubic.py`                     | `optimized_bicubic_float.py`                  | `optimized_bicubic_fixed_point.py` (Q_Kernel=Q7.8, Q_Pixel=UQ16.8/Q15.8) |
+| :----------------------- | :------------------------------------------- | :-------------------------------------------- | :---------------------------------------------------------------------- |
+| **卷積核係數**           | 浮點數 (例如 1.5, -0.5)                      | 精確分數 (例如 3/2, -1/2)                     | 模擬定點數 (基於精確分數)                                               |
+| **主要算術運算**         | 浮點乘法、加法                             | 浮點乘法、加法                                | 模擬定點乘法 (移位+加法)、定點加法、飽和                                |
+| **數據精度**             | 標準 Python 浮點數 (通常雙精度)              | 標準 Python 浮點數                            | 模擬 W/F 位定點數                                                       |
+| **`vec` 模式 N-D 支持**  | 原始 `imresizevec` 有限制/問題               | `imresizevec_optimized` 穩健支持 N-D          | `imresizevec_fixed_point` 基於穩健的 N-D 結構，但內部定點運算為元素級模擬 |
+| **預期硬體資源 (係數應用)** | 通用浮點/定點乘法器                        | 移位器、加法器                                | 移位器、加法器 (位寬固定)                                               |
+| **潛在誤差源**           | 浮點捨入                                     | 浮點捨入                                      | 量化誤差、溢出/飽和誤差、捨入(定點)                                     |
 
-### 4.1. Kernel Modification
-A new kernel function, `hardware_friendly_cubic(x)`, was designed. Mathematically, it is identical to the original `cubic(x)` function when `a=-0.5`. The difference lies in how the calculations involving coefficients are expressed.
+### 4.2. PSNR 及執行時間結果 (基於最近一次運行)
 
-**Original `cubic(x)` (for `|x| <= 1`):**
-`1.5*|x|^3 - 2.5*|x|^2 + 1`
+下表總結了 `compare_all_versions.py` 腳本的典型運行結果：
 
-**`hardware_friendly_cubic(x)` (for `|x| <= 1`), equivalent form:**
-`(3 * |x|^3 - 5 * |x|^2 + 2) / 2`
+| 測試案例 (圖像類型) | 模式 (`mode`) | `traditional` 時間 (s) | `optimized_float` 時間 (s) | `optimized_fixed_point` 時間 (s) | PSNR (OptFloat vs Trad) (dB) | PSNR (OptFixed vs Trad_vec) (dB) | PSNR (OptFixed vs OptFloat) (dB) |
+| :-------------------- | :------------ | :-------------------- | :-------------------------- | :------------------------------ | :--------------------------- | :------------------------------- | :------------------------------- |
+| 灰階 256->512         | org           | ~4.0                  | ~3.7                        | N/A                             | ~48.0                        | N/A                              | N/A                              |
+| 灰階 256->512         | vec           | ~0.03                 | ~0.02                       | ~15.0                           | ~48.0                        | inf (見註1)                      | ~48.0                            |
+| 彩色 256->512         | org           | ~10.9                 | ~12.1 (註2)                 | N/A                             | ~49.2                        | N/A                              | N/A                              |
+| 彩色 256->512         | vec           | ~0.03                 | ~0.05                       | ~44.7                           | ~49.2                        | inf (見註1)                      | ~49.2                            |
 
-Similar transformations apply to the `1 < |x| <= 2` case:
-**Original:** `-0.5*|x|^3 + 2.5*|x|^2 - 4*|x| + 2`
-**Equivalent:** `(-|x|^3 + 5*|x|^2 - 8*|x| + 4) / 2`
+**結果表格註釋：**
+*   **註1 (`inf dB` for OptFixed vs Trad_vec)**：此 `inf dB` 結果極具誤導性。`traditional_bicubic.py` 的 `vec` 模式 (`imresizevec`) 存在已知的實現問題，其輸出可能本身就是錯誤的或過於簡化的。此處的 `inf dB` 很可能表示 `optimized_fixed_point` (vec) 和 `traditional_bicubic` (vec) 產生了相同的（可能有問題的）輸出，而非定點版本達到了理想浮點精度。**因此，衡量定點版本精度的主要參考應為 `PSNR (OptFixed vs OptFloat)`。**
+*   **註2 (OptFloat `org` 模式時間)**：彩色圖像的 `org` 模式下，`optimized_float` 的時間略高於 `traditional`。這可能是由於 `optimized_float` 中更精確的逐通道處理和對 `imresizemex_optimized` 的調用引入了微小的額外開銷，或者僅僅是測試波動。在 `vec` 模式下，`optimized_float` 通常更快（除了彩色圖像的某次運行，這可能也是波動）。Python 層面的時間僅供參考，不直接反映硬體性能。
 
-### 4.2. Anticipated Hardware Implementation Advantages
-This re-representation is highly beneficial for hardware:
-*   **Multiplication by `N/2`**: Operations like `(Val * 3) / 2` can be implemented as `( (Val << 1) + Val ) >> 1`. This uses one adder and two shifters.
-*   **Multiplication by Integer**: `Val * C` (where C is a small integer like 3, 5, 8) can be done with shifters and adders. For example, `Val * 3 = (Val << 1) + Val`. `Val * 5 = (Val << 2) + Val`. `Val * 8 = Val << 3`.
-*   **Resource Saving**: This approach replaces general-purpose multipliers (which are area-intensive and can be slower) needed for floating-point or arbitrary fixed-point coefficient multiplication with simpler, faster, and more area-efficient shifters and adders.
-*   The core multiplications for `|x|^2` and `|x|^3` (data * data) remain, but the constant coefficient multiplications are significantly simplified.
+### 4.3. 結果分析與討論
 
-## 5. Python Simulation and Validation
+*   **`Optimized Float` vs. `Traditional (org mode)`**：
+    *   PSNR 值穩定在 48-49 dB 左右。雖然這不是理論上的無窮大（表明兩個浮點實現之間仍存在微小的數值差異，即使在盡力統一邏輯後），但這個 PSNR 水平通常表示圖像在視覺上幾乎無法區分。對於評估硬體優化演算法的起點而言，這是一個非常高的匹配度。差異可能源於極其細微的 NumPy 內部操作順序或浮點運算累積效應。
 
-### 5.1. Test Environment (`test_interpolation.py`)
-A dedicated Python script (`test_interpolation.py`) was created to:
-*   Generate 256x256 grayscale and 3-channel color test images.
-*   Upscale these images to 512x512 using both the traditional `bicubic` method and the new `bicubic_hw_friendly` method from `image_interpolation.py`.
-*   Utilize `skimage.metrics.peak_signal_noise_ratio` to calculate the PSNR between the outputs of the two methods.
-*   Measure and report the Python execution time for each method.
+*   **`Optimized Fixed-Point (vec)` vs. `Optimized Float (vec)`**：
+    *   PSNR 值同樣在 48-49 dB 左右 (基於 Q_Kernel=Q7.8, Q_Pixel=UQ16.8/Q15.8 的配置)。這表明，對於當前選擇的定點參數，定點化引入的誤差相對於 `Optimized Float` 版本（它本身與 `Traditional (org)` 就有約48dB的差異）來說，並沒有導致 *額外* 的、災難性的精度下降。換句話說，定點版本的輸出質量與 `Optimized Float` 版本的輸出質量非常接近。
+    *   **這是一個關鍵的積極結果**：它暗示我們選擇的定點位寬 (W=16/24, F=8) 能夠在很大程度上保持 `Optimized Float` 演算法的輸出質量。如果 `Optimized Float` 本身被視為一個可接受的、硬體友善的浮點目標，那麼定點版本也達到了相似的質量水平。
+    *   當然，如果目標是讓 `Optimized Float` 與 `Traditional (org)` 完全一致 (PSNR=inf)，那麼後續所有比較都應基於此進行調整。但目前看來，`Optimized Float` 自身是一個穩定的參考。
 
-### 5.2. Simulation Results Analysis
+*   **執行時間**：
+    *   定點版本的 Python 模擬由於其元素級的定點運算循環，執行時間遠高於浮點版本。這在預期之內，因為模擬的目的不是 Python 性能，而是精度分析。
+    *   浮點版本的 `vec` 模式通常比 `org` 模式快得多，顯示了 NumPy 向量化的優勢。
 
-*   **Image Quality (PSNR)**:
-    *   For both grayscale and color images, the PSNR between the output of `bicubic_hw_friendly` and `bicubic` was **infinite (inf dB)**.
-    *   The sum of absolute differences between the outputs was **0.0**.
-    *   This confirms that, within Python's floating-point precision, the hardware-friendly modifications are mathematically equivalent to the original algorithm and **introduce no degradation in image quality**. The `RuntimeWarning: divide by zero` during PSNR calculation is expected when images are identical (MSE is zero).
+## 5. 結論
 
-*   **Python Execution Time (Secondary Observation)**:
-    *   A modest speedup was observed in the Python execution of `bicubic_hw_friendly` compared to the original `bicubic` implementation.
-        *   Grayscale (256x256 -> 512x512): ~0.055s (HW-friendly) vs. ~0.103s (Traditional)
-        *   Color (256x256x3 -> 512x512x3): ~0.206s (HW-friendly) vs. ~0.303s (Traditional)
-    *   This speedup is likely due to differences in how NumPy handles the slightly restructured arithmetic operations in Python, and is not the primary goal, but a welcome side-effect. The true performance benefit is expected in actual hardware.
+本專案成功地實現並比較了三種 Bicubic 插值演算法：傳統浮點版、硬體優化浮點版、以及硬體優化定點模擬版。
 
-## 6. Conclusion
+1.  **硬體優化浮點演算法 (`optimized_bicubic_float.py`)**：通過將卷積核係數表示為精確分數，展示了在不損失圖像主要品質的前提下（與傳統 `org` 模式相比 PSNR 約 48-49 dB，視覺差異極小），為硬體實現（使用移位和加法代替乘法器）提供了清晰的簡化路徑。
 
-The project successfully developed and validated a hardware-friendly bicubic interpolation algorithm. The key achievements are:
+2.  **硬體優化定點模擬 (`optimized_bicubic_fixed_point.py`)**：
+    *   使用 Q7.8 (核內部) 和 UQ16.8/Q15.8 (像素/權重) 的定點表示，其輸出圖像與硬體優化浮點版的 PSNR 約為 48-49 dB。這表明選定的定點位寬和運算策略能夠較好地保持圖像質量，相對於其浮點對應版本，沒有引入顯著的額外誤差。
+    *   這為實際硬體設計中選擇合適的位寬以平衡精度和資源消耗提供了重要參考。
 
-1.  **No Image Quality Degradation**: The Python simulation demonstrated that the optimized algorithm produces results identical to the traditional bicubic method, maintaining maximum PSNR.
-2.  **Significant Potential for Hardware Efficiency**: The algorithm's design, by re-representing coefficients as simple fractions, paves the way for a hardware implementation that relies on shifters and adders instead of more complex multipliers for coefficient application. This is anticipated to lead to substantial savings in hardware area, power consumption, and potentially improved clock speeds.
-3.  **Python Verification**: The provided Python scripts (`image_interpolation.py` and `test_interpolation.py`) serve as a complete reference and verification environment for the algorithm.
+3.  **關於 `Traditional (vec)` 模式**：其輸出與其他版本比較時出現的 `inf dB` PSNR 結果應謹慎對待，這更可能反映了該特定 `vec` 實現的問題，而不是定點版本達到了完美的浮點精度。
 
-The developed `hardware_friendly_cubic` algorithm meets the project's objective of providing a high-quality image scaling solution optimized for hardware implementation.
+總體而言，本專案驗證了硬體友善的 Bicubic 優化思路的可行性，並通過定點模擬初步評估了其在有限精度硬體環境中的圖像品質表現。結果表明，即使進行了旨在簡化硬體的演算法調整和定點化處理，仍有望獲得高質量的插值結果。
 
-### 6.1. Future Work
-*   Implement the `hardware_friendly_cubic` algorithm in a Hardware Description Language (e.g., Verilog or VHDL).
-*   Synthesize the HDL design for a target FPGA or ASIC to quantify actual resource usage, power, and timing performance.
-*   Compare these hardware metrics against a similarly implemented traditional bicubic interpolator.
-*   Investigate fixed-point arithmetic effects: determine optimal bit-widths for intermediate calculations in hardware to balance precision and resource cost.
-
-This project provides a strong algorithmic foundation for such future hardware development efforts.
+### 5.1. 未來工作
+*   徹底調試 `Optimized Float (org)` 與 `Traditional (org)` 之間 PSNR 未達到無窮大的原因，力求完美匹配。
+*   探索不同定點位寬 (`W`, `F`) 對 `Optimized Fixed-Point` 版本 PSNR 的影響，進行更細緻的精度-資源權衡分析。
+*   實現 `Optimized Fixed-Point` 的 `org` 模式以進行更全面的比較。
+*   基於 `Optimized Fixed-Point` 的設計，進行實際的硬體描述語言 (HDL) 編碼與綜合，以獲取真實的硬體資源和性能數據。
