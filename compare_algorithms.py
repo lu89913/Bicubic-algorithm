@@ -126,8 +126,10 @@ def analyze_memory_access(original_shape, out_shape, scale_factor_x, scale_facto
 
 if __name__ == "__main__":
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    image_filename = "gradient.png" # Make sure this is in 'images' directory
+    image_filename = "complex_test_image_256.png" # Use the new complex image
     image_path = os.path.join(base_dir, "images", image_filename)
+    output_dir = os.path.join(base_dir, "images", "output")
+    os.makedirs(output_dir, exist_ok=True) # Ensure output directory exists
 
     try:
         pil_img_orig = Image.open(image_path).convert('L')
@@ -136,11 +138,13 @@ if __name__ == "__main__":
         print(f"Error: Test image '{image_path}' not found.")
         sys.exit(1)
 
-    scale_x, scale_y = 1.5, 1.5
+    scale_x, scale_y = 2.0, 2.0 # Scale 256x256 to 512x512
     a_values_to_test = [-0.5, -0.75, -1.0] # Values of 'a' to test
+    # F_BITS is read from hardware_friendly_bicubic.py, ensure it's 10 for these tests.
 
     print(f"Comparing Bicubic Algorithms for image: '{image_filename}' ({np_img_orig.shape[1]}x{np_img_orig.shape[0]})")
-    print(f"Scaling by factor: {scale_x}x horizontally, {scale_y}x vertically.")
+    print(f"Scaling by factor: {scale_x}x horizontally, {scale_y}x vertically (Output: {int(np_img_orig.shape[1]*scale_x)}x{int(np_img_orig.shape[0]*scale_y)}).")
+    print(f"Using F_BITS = {F_BITS} for fixed-point operations.")
 
     # --- Pillow (Reference, typically a=-0.5 or similar) ---
     start_time = time.time()
@@ -150,6 +154,10 @@ if __name__ == "__main__":
     np_pil_resized = np.array(pil_img_resized, dtype=np.uint8)
     pillow_time = time.time() - start_time
     print(f"\n1. Pillow BICUBIC resizing done in {pillow_time:.4f}s (Used as reference for a ~ -0.5)")
+    # Save Pillow's output
+    pillow_output_filename = os.path.join(output_dir, f"{os.path.splitext(image_filename)[0]}_pillow_bicubic.png")
+    pil_img_resized.save(pillow_output_filename)
+    print(f"  Saved Pillow output to {pillow_output_filename}")
 
     for a_val in a_values_to_test:
         print(f"\n--- Testing with a = {a_val} ---")
@@ -159,12 +167,18 @@ if __name__ == "__main__":
         np_float_resized = float_bicubic_resize(np_img_orig, scale_x, scale_y, a=a_val)
         float_time = time.time() - start_time
         print(f"  2. Traditional Float Bicubic (a={a_val}) resizing done in {float_time:.4f}s")
+        float_output_filename = os.path.join(output_dir, f"{os.path.splitext(image_filename)[0]}_float_a{a_val}.png")
+        Image.fromarray(np_float_resized, mode='L').save(float_output_filename)
+        print(f"    Saved Float (a={a_val}) output to {float_output_filename}")
 
         # --- Hardware-Friendly Fixed-Point Bicubic ---
         start_time = time.time()
         np_fixed_resized = bicubic_resize_fixed_point(np_img_orig, scale_x, scale_y, a_float=a_val)
         fixed_time = time.time() - start_time
-        print(f"  3. Hardware-Friendly Fixed-Point Bicubic (a={a_val}) resizing done in {fixed_time:.4f}s")
+        print(f"  3. Hardware-Friendly Fixed-Point Bicubic (a={a_val}, F_BITS={F_BITS}) resizing done in {fixed_time:.4f}s")
+        fixed_output_filename = os.path.join(output_dir, f"{os.path.splitext(image_filename)[0]}_fixed_a{a_val}_fb{F_BITS}.png")
+        Image.fromarray(np_fixed_resized, mode='L').save(fixed_output_filename)
+        print(f"    Saved Fixed-Point (a={a_val}, F_BITS={F_BITS}) output to {fixed_output_filename}")
 
         # --- Image Quality Comparison ---
         print(f"\n  --- Image Quality (PSNR dB / MSE) for a = {a_val} ---")
