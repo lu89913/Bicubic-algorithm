@@ -168,15 +168,11 @@ def imresizemex(inimg, weights, indices, dim):
         return outimg
 
 def imresizevec(inimg, weights, indices, dim):
-    outimg = None # Initialize outimg
     # Ensure inimg is float for calculations
     # If inimg is uint8, its values are 0-255. Calculations should be float.
     inimg_float = inimg.astype(np.float64)
 
     w_shape = weights.shape # (out_dim_len, num_contrib_pixels)
-
-    # Debug prints
-    # print(f"Debug imresizevec: dim={dim}, inimg_float.shape={inimg_float.shape}, weights.shape={weights.shape}, indices.shape={indices.shape}")
 
     if dim == 0: # Interpolating along columns (dimension 0)
         # Output shape: (out_dim_len, in_shape[1], in_shape[2]...)
@@ -184,44 +180,42 @@ def imresizevec(inimg, weights, indices, dim):
         # indices: (w_shape[0], w_shape[1])
 
         gathered_pixels = inimg_float[indices] # Shape: (L_out, N_coeffs, D1, D2, ...)
+        # Ensure correct expansion for broadcasting with gathered_pixels
         reshaped_weights = weights.reshape(w_shape[0], w_shape[1], *((1,)*(inimg_float.ndim - 1)))
 
-        # print(f"  dim=0: gathered_pixels.shape={gathered_pixels.shape}, reshaped_weights.shape={reshaped_weights.shape}")
-
         outimg = np.sum(gathered_pixels * reshaped_weights, axis=1)
-        # print(f"  dim=0: outimg.shape after sum: {outimg.shape if outimg is not None else 'None'}")
-
 
     elif dim == 1:
         # Interpolating along rows (dimension 1)
-        img_perm = np.transpose(inimg_float, np.roll(np.arange(inimg_float.ndim), -dim))
-        # Now img_perm has shape (L_in, D0, D2, ...), we interpolate its axis 0
+        # Permute axes to bring the current interpolation dimension to the front
+        # This simplifies indexing for gathering pixels.
+        # Example: if inimg_float is (H, W, C) and dim is 1 (W),
+        # img_perm becomes (W, H, C). 'indices' then apply to the new 0th axis of img_perm.
+        permute_order = np.roll(np.arange(inimg_float.ndim), -dim)
+        img_perm = np.transpose(inimg_float, permute_order)
 
-        gathered_pixels = img_perm[indices] # Shape: (L_out, N_coeffs, D0, D2, ...)
+        # indices are for the original dimension 'dim', which is now axis 0 of img_perm
+        gathered_pixels = img_perm[indices] # Shape: (L_out, N_coeffs, D_other1, D_other2, ...)
+
+        # Ensure correct expansion for broadcasting with gathered_pixels
+        # The number of trailing '1's should match the number of "other" dimensions in gathered_pixels
         reshaped_weights = weights.reshape(w_shape[0], w_shape[1], *((1,)*(img_perm.ndim - 1)))
 
-        # print(f"  dim=1: img_perm.shape={img_perm.shape}, gathered_pixels.shape={gathered_pixels.shape}, reshaped_weights.shape={reshaped_weights.shape}")
+        interpolated_permuted = np.sum(gathered_pixels * reshaped_weights, axis=1) # Sum over N_coeffs
+                                                                                   # Shape: (L_out, D_other1, D_other2, ...)
 
-        interpolated_permuted = np.sum(gathered_pixels * reshaped_weights, axis=1) # Shape (L_out, D0, D2, ...)
-        # print(f"  dim=1: interpolated_permuted.shape: {interpolated_permuted.shape if interpolated_permuted is not None else 'None'}")
-
-        inv_perm_indices = np.argsort(np.roll(np.arange(inimg_float.ndim), -dim))
-        outimg = np.transpose(interpolated_permuted, inv_perm_indices)
-        # print(f"  dim=1: outimg.shape after transpose: {outimg.shape if outimg is not None else 'None'}")
-
-    # print(f"  outimg.shape before clip/return: {outimg.shape if outimg is not None else 'None'}")
-
-    if outimg is None:
-        # This case should not be reached if dim is always 0 or 1 and calculations are correct.
-        # Raise an error or handle appropriately if it can be.
-        # For now, if it's None, the clip below will fail, which is what we're seeing.
-        print(f"Error: outimg is None before clipping in imresizevec (dim={dim})")
-
+        # Permute back to original dimension order
+        # The inverse permutation is found by argsort of the original permute_order
+        inv_permute_order = np.argsort(permute_order)
+        outimg = np.transpose(interpolated_permuted, inv_permute_order)
+    else:
+        # This case should ideally not be reached if 'dim' is always 0 or 1.
+        # Raise an error for unexpected dim value.
+        raise ValueError(f"Invalid dimension '{dim}' for interpolation. Must be 0 or 1.")
 
     if inimg.dtype == np.uint8:
-        # The following line will fail if outimg is None
-        outimg_clipped = np.clip(outimg, 0, 255)
-        return np.around(outimg_clipped).astype(np.uint8)
+        outimg = np.clip(outimg, 0, 255)
+        return np.around(outimg).astype(np.uint8)
     else:
         return outimg
 
