@@ -7,10 +7,14 @@ import time # For basic timing
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from traditional_bicubic import bicubic_resize as float_bicubic_resize
-from traditional_bicubic import cubic_kernel as float_cubic_kernel # For complexity discussion
+# Import the new MATLAB-equivalent Bicubic implementation
+from matlab_imresize_equivalent import imresize as matlab_equivalent_bicubic_resize
+# We will also keep our hardware-friendly fixed-point implementation
 from hardware_friendly_bicubic import bicubic_resize_fixed_point
-from hardware_friendly_bicubic import cubic_kernel_fixed_point, F_BITS # For complexity discussion
+from hardware_friendly_bicubic import cubic_kernel_fixed_point, F_BITS # For complexity discussion and ensuring F_BITS is known
+
+# The old traditional_bicubic is no longer the primary float reference for MATLAB comparison.
+# from traditional_bicubic import cubic_kernel as float_cubic_kernel # For complexity discussion if needed
 
 def calculate_psnr_mse(img1, img2):
     """Calculates PSNR and MSE between two images."""
@@ -126,25 +130,32 @@ def analyze_memory_access(original_shape, out_shape, scale_factor_x, scale_facto
 
 if __name__ == "__main__":
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    image_filename = "complex_test_image_256.png" # Use the new complex image
+    # Default to Cameraman.tif for MATLAB comparison focus
+    image_filename = "Cameraman.tif"
+    # image_filename = "complex_test_image_256.png" # Can be switched for other tests
     image_path = os.path.join(base_dir, "images", image_filename)
     output_dir = os.path.join(base_dir, "images", "output")
     os.makedirs(output_dir, exist_ok=True) # Ensure output directory exists
 
     try:
-        pil_img_orig = Image.open(image_path).convert('L')
+        pil_img_orig = Image.open(image_path)
+        if pil_img_orig.mode != 'L': # Ensure grayscale
+            pil_img_orig = pil_img_orig.convert('L')
         np_img_orig = np.array(pil_img_orig, dtype=np.uint8)
     except FileNotFoundError:
-        print(f"Error: Test image '{image_path}' not found.")
+        print(f"Error: Test image '{image_path}' not found. Please ensure it is in the 'images/' directory.")
         sys.exit(1)
 
-    scale_x, scale_y = 2.0, 2.0 # Scale 256x256 to 512x512
-    a_values_to_test = [-0.5, -0.75, -1.0] # Values of 'a' to test
-    # F_BITS is read from hardware_friendly_bicubic.py, ensure it's 10 for these tests.
+    scale_x, scale_y = 2.0, 2.0 # For 256x256 to 512x512, or general 2x upscale
+
+    # matlab_imresize_equivalent uses a fixed a=-0.5 for its cubic kernel.
+    # Our hardware_friendly_bicubic will also be tested with a=-0.5.
+    a_val_for_comparison = -0.5
 
     print(f"Comparing Bicubic Algorithms for image: '{image_filename}' ({np_img_orig.shape[1]}x{np_img_orig.shape[0]})")
-    print(f"Scaling by factor: {scale_x}x horizontally, {scale_y}x vertically (Output: {int(np_img_orig.shape[1]*scale_x)}x{int(np_img_orig.shape[0]*scale_y)}).")
-    print(f"Using F_BITS = {F_BITS} for fixed-point operations.")
+    print(f"Scaling by factor: {scale_x}x (Output: {int(np_img_orig.shape[1]*scale_x)}x{int(np_img_orig.shape[0]*scale_y)}).")
+    print(f"Fixed-point operations using F_BITS = {F_BITS} and a = {a_val_for_comparison}.")
+    print(f"Python float reference is 'matlab_imresize_equivalent.py' (aims for MATLAB bicubic a=-0.5).")
 
     # --- Pillow (Reference, typically a=-0.5 or similar) ---
     start_time = time.time()
@@ -159,64 +170,58 @@ if __name__ == "__main__":
     pil_img_resized.save(pillow_output_filename)
     print(f"  Saved Pillow output to {pillow_output_filename}")
 
-    for a_val in a_values_to_test:
-        print(f"\n--- Testing with a = {a_val} ---")
+    # --- Python MATLAB-Equivalent Float Bicubic (a=-0.5 internal) ---
+    start_time = time.time()
+    # The matlab_equivalent_bicubic_resize function expects uint8 or float [0,1].
+    # np_img_orig is uint8, so it's suitable.
+    np_matlab_equiv_resized = matlab_equivalent_bicubic_resize(np_img_orig, scalar_scale=scale_x, method='bicubic')
+    matlab_equiv_time = time.time() - start_time
+    print(f"\n2. Python MATLAB-Equivalent Bicubic (a=-0.5 internal) resizing done in {matlab_equiv_time:.4f}s")
+    matlab_equiv_output_filename = os.path.join(output_dir, f"{os.path.splitext(image_filename)[0]}_matlab_equivalent_python.png")
+    Image.fromarray(np_matlab_equiv_resized, mode='L').save(matlab_equiv_output_filename)
+    print(f"  Saved Python MATLAB-Equivalent output to {matlab_equiv_output_filename}")
 
-        # --- Traditional Float Bicubic ---
-        start_time = time.time()
-        np_float_resized = float_bicubic_resize(np_img_orig, scale_x, scale_y, a=a_val)
-        float_time = time.time() - start_time
-        print(f"  2. Traditional Float Bicubic (a={a_val}) resizing done in {float_time:.4f}s")
-        float_output_filename = os.path.join(output_dir, f"{os.path.splitext(image_filename)[0]}_float_a{a_val}.png")
-        Image.fromarray(np_float_resized, mode='L').save(float_output_filename)
-        print(f"    Saved Float (a={a_val}) output to {float_output_filename}")
+    # --- Hardware-Friendly Fixed-Point Bicubic (using a_val_for_comparison = -0.5) ---
+    start_time = time.time()
+    np_fixed_resized = bicubic_resize_fixed_point(np_img_orig, scale_x, scale_y, a_float=a_val_for_comparison)
+    fixed_time = time.time() - start_time
+    print(f"\n3. Hardware-Friendly Fixed-Point Bicubic (a={a_val_for_comparison}, F_BITS={F_BITS}) resizing done in {fixed_time:.4f}s")
+    fixed_output_filename = os.path.join(output_dir, f"{os.path.splitext(image_filename)[0]}_hardware_friendly_a{a_val_for_comparison}_fb{F_BITS}.png")
+    Image.fromarray(np_fixed_resized, mode='L').save(fixed_output_filename)
+    print(f"  Saved Hardware-Friendly Fixed-Point output to {fixed_output_filename}")
 
-        # --- Hardware-Friendly Fixed-Point Bicubic ---
-        start_time = time.time()
-        np_fixed_resized = bicubic_resize_fixed_point(np_img_orig, scale_x, scale_y, a_float=a_val)
-        fixed_time = time.time() - start_time
-        print(f"  3. Hardware-Friendly Fixed-Point Bicubic (a={a_val}, F_BITS={F_BITS}) resizing done in {fixed_time:.4f}s")
-        fixed_output_filename = os.path.join(output_dir, f"{os.path.splitext(image_filename)[0]}_fixed_a{a_val}_fb{F_BITS}.png")
-        Image.fromarray(np_fixed_resized, mode='L').save(fixed_output_filename)
-        print(f"    Saved Fixed-Point (a={a_val}, F_BITS={F_BITS}) output to {fixed_output_filename}")
+    # --- Image Quality Comparison ---
+    # User will provide PSNR for: MATLAB_original_output vs np_matlab_equiv_resized
 
-        # --- Image Quality Comparison ---
-        print(f"\n  --- Image Quality (PSNR dB / MSE) for a = {a_val} ---")
-        psnr_float_vs_pillow, mse_float_vs_pillow = calculate_psnr_mse(np_float_resized, np_pil_resized)
-        print(f"    Float (a={a_val}) vs Pillow: PSNR={psnr_float_vs_pillow:.2f} dB, MSE={mse_float_vs_pillow:.2f}")
+    print(f"\n--- Image Quality (PSNR dB / MSE) for a = {a_val_for_comparison} ---")
+    print(f"  (User to provide PSNR for MATLAB_original vs. Python_matlab_equivalent ('{matlab_equiv_output_filename}') )")
 
-        psnr_fixed_vs_pillow, mse_fixed_vs_pillow = calculate_psnr_mse(np_fixed_resized, np_pil_resized)
-        print(f"    Fixed-Point (a={a_val}) vs Pillow: PSNR={psnr_fixed_vs_pillow:.2f} dB, MSE={mse_fixed_vs_pillow:.2f}")
+    psnr_fixed_vs_matlab_equiv, mse_fixed_vs_matlab_equiv = calculate_psnr_mse(np_fixed_resized, np_matlab_equiv_resized)
+    print(f"  Our Fixed-Point (a={a_val_for_comparison}) vs. Python_matlab_equivalent (a=-0.5): PSNR={psnr_fixed_vs_matlab_equiv:.2f} dB, MSE={mse_fixed_vs_matlab_equiv:.2f}")
 
-        psnr_fixed_vs_float, mse_fixed_vs_float = calculate_psnr_mse(np_fixed_resized, np_float_resized)
-        print(f"    Fixed-Point (a={a_val}) vs Float (a={a_val}): PSNR={psnr_fixed_vs_float:.2f} dB, MSE={mse_fixed_vs_float:.2f}")
+    # Comparisons with Pillow
+    psnr_matlab_equiv_vs_pillow, mse_matlab_equiv_vs_pillow = calculate_psnr_mse(np_matlab_equiv_resized, np_pil_resized) # np_pil_resized was correct
+    print(f"  Python_matlab_equivalent vs. Pillow: PSNR={psnr_matlab_equiv_vs_pillow:.2f} dB, MSE={mse_matlab_equiv_vs_pillow:.2f}")
 
-        # --- Complexity Analysis (specific to this 'a' if kernel analysis is updated) ---
-        # analyze_kernel_complexity() # This function needs to be parameterized or display general info
+    psnr_fixed_vs_pillow, mse_fixed_vs_pillow = calculate_psnr_mse(np_fixed_resized, np_pil_resized) # np_pil_resized was correct
+    print(f"  Our Fixed-Point (a={a_val_for_comparison}) vs. Pillow: PSNR={psnr_fixed_vs_pillow:.2f} dB, MSE={mse_fixed_vs_pillow:.2f}")
 
-        # --- Memory Access Analysis (independent of 'a') ---
-        # analyze_memory_access(np_img_orig.shape, np_fixed_resized.shape, scale_x, scale_y) # Only run once if results are same
-
-        print(f"\n  --- Summary for Hardware-Friendly Version (a={a_val}) ---")
-        print(f"  1. Image Quality: Fixed-Point vs Float (a={a_val}): PSNR={psnr_fixed_vs_float:.2f} dB. Fixed-Point vs Pillow: PSNR={psnr_fixed_vs_pillow:.2f} dB.")
-        print(f"     (Using {F_BITS}-bit fractional precision for fixed-point.)")
-        # Computation simplification summary might need to be general or mention specific 'a' if optimized
-        print("  2. Computation Simplification (Qualitative):")
-        if a_val in [-0.5, -0.75, -1.0]:
-            print(f"     - Kernel for a={a_val}: Optimized with shifts & integer adds.")
-        else:
-            print(f"     - Kernel for a={a_val}: Uses generic fixed-point multiplications for coefficients.")
-        print("     - Interpolation: Float multiplications (20 per pixel) replaced by integer multiplications.")
+    print(f"\n--- Summary for Hardware-Friendly Version (a={a_val_for_comparison}, F_BITS={F_BITS}) ---")
+    print(f"  1. Image Quality: Hardware-Friendly Fixed-Point vs. Python_matlab_equivalent_ref: PSNR={psnr_fixed_vs_matlab_equiv:.2f} dB.")
+    print(f"     (This PSNR value is key for validating our fixed-point implementation against the new Python float reference that aims to mimic MATLAB's bicubic a=-0.5 behavior)")
+    print(f"     (Using {F_BITS}-bit fractional precision for fixed-point.)")
+    print(f"  2. Computation Simplification (Qualitative for a={a_val_for_comparison}):") # Corrected a_val to a_val_for_comparison
+    print(f"     - Kernel for a={a_val_for_comparison}: Optimized with shifts & integer adds.")
+    print("     - Interpolation: Float multiplications (20 per pixel) replaced by integer multiplications.")
     
-    # General analyses that are not 'a' dependent can be run once outside the loop
-    print("\n--- General Complexity & Memory Analysis ---")
-    analyze_kernel_complexity() # Should be updated to discuss different 'a' values
+    # General analyses (Kernel complexity now focuses on a=-0.5 due to new reference)
+    print("\n--- General Complexity & Memory Analysis (Focus on a=-0.5 behavior) ---")
+    analyze_kernel_complexity() # The function itself discusses various 'a' values, context is now a=-0.5 focus
     analyze_interpolation_complexity()
-    # Assuming np_fixed_resized from the last iteration for shape, or use expected_width/height
     analyze_memory_access(np_img_orig.shape, (expected_height, expected_width), scale_x, scale_y)
 
     print("\n--- Overall Summary of Advantages for Hardware-Friendly Version ---")
-    print(f"  Key benefit: Maintains high PSNR across various 'a' values while enabling hardware-efficient computation.")
+    print(f"  Key benefit: Maintains high PSNR (vs. its Python MATLAB-equivalent float reference with a=-0.5) while enabling hardware-efficient computation.")
     print(f"  (Refer to specific 'a' value summaries above for detailed PSNRs with {F_BITS}-bit fractional precision)")
     print("  Computation Simplification:")
     print("   - Kernel: Float multiplications for coefficients replaced by shifts & integer adds (for a=-0.5, -0.75, -1.0) or generic fixed-point ops.")

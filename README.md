@@ -4,21 +4,26 @@
 
 本項目的目標是開發一種適合在硬體（如FPGA）上實現的優化 Bicubic 插值演算法。我們使用 Python 進行模擬，以證明該優化演算法在保持可接受圖像品質的前提下，相對於傳統的、直接映射的 Bicubic 演算法，在硬體相關的關鍵指標（如計算複雜度、記憶體帶寬需求）上具有優勢。
 
-## 2. 傳統 Bicubic 演算法基準
+## 2. Python Bicubic 浮點參考基準的演進與 MATLAB 對齊
 
-*   我們首先實現了一個標準的浮點 Bicubic 插值演算法 (`src/traditional_bicubic.py`)，採用常用的 `a=-0.5` 卷積核參數。
-*   為了驗證其正確性，將其輸出與 Python 圖像處理庫 Pillow 的 `BICUBIC` 方法進行了比較。對於測試圖像 (`images/gradient.png`，64x64，1.5倍縮放)，兩者輸出的 PSNR 約為 **49.98 dB** (MSE ≈ 0.65)，表明我們的浮點基準實現是準確的。
+*   項目初期，我們實現了一個自定義的浮點 Bicubic 插值演算法 (`src/traditional_bicubic.py`)，該演算法允許配置卷積核參數 `a` 並採用了 `reflect` 邊界處理。與 Pillow 庫的 `BICUBIC` 比較（`a=-0.5`, `gradient.png`）顯示 PSNR 約為 49.98 dB。
+*   在嘗試與 MATLAB `imresize(..., 'bicubic')` 比較時，發現即使將邊界處理調整為 `mode='edge'`（模擬 MATLAB 的 `replicate` 行為），我們自定義的浮點實現與 MATLAB 的輸出（`Cameraman.tif`, 2x 放大, `a=-0.5`）PSNR 僅約 33.61 dB。這表明除了邊界處理，MATLAB 的實現還包含了更特定的座標映射或卷積核細節。
+*   為了更精確地模擬 MATLAB `imresize` 中 `bicubic`（預期 `a=-0.5`）的行為，我們引入了一個由社區貢獻、旨在復現 MATLAB `imresize` 的 Python 實現 (`src/matlab_imresize_equivalent.py`)。該實現內部採用了與 MATLAB 相似的座標計算方式和邊界處理邏輯，並且其三次卷積核固定為 `a=-0.5`。
+*   **關鍵對齊成果**: 使用 `Cameraman.tif` (256x256, 2倍放大) 進行測試，`matlab_imresize_equivalent.py` 的輸出與用戶提供的 MATLAB `imresize` 實際輸出相比，PSNR 達到了 **41.58 dB** (MSE ≈ 4.52)。這表明 `matlab_imresize_equivalent.py` 是一個與 MATLAB 行為高度一致的 Python 浮點參考基準。
 
 ## 3. 硬體友好型 Bicubic 演算法的設計與優化
 
-基於傳統浮點演算法，我們設計並實現了一個硬體友好的版本 (`src/hardware_friendly_bicubic.py`)，主要包含以下優化：
+基於上述與 MATLAB 高度對齊的 Python 浮點參考 (`matlab_imresize_equivalent.py`，其核心為 `a=-0.5` 的 Bicubic 核)，我們對硬體友好型定點演算法 (`src/hardware_friendly_bicubic.py`) 進行了驗證和評估。主要優化包括：
 
 ### 3.1. 定點化 (Fixed-Point Arithmetic)
 
-*   **策略**: 所有浮點運算（包括輸入的小數座標、三次卷積核函數內部計算、插值權重計算以及最終的像素值混合）都被轉換為定點整數運算。
-*   **參數**: 最初選擇了8位小數精度 (`F_BITS = 8`)。經過進一步實驗，我們發現將小數精度提升至 **10位** (`F_BITS = 10`，即小數乘以 `2^10 = 1024` 後取整) 可以顯著提高定點實現與浮點實現的一致性，特別是對於不同的卷積核參數 `a`。
-*   **圖像品質 (F_BITS = 10, a = -0.5)**: 對於常用的 `a=-0.5`，使用10位小數精度的定點版本，與其對應的浮點基準版本相比，PSNR 達到了 **無限大** (MSE ≈ 0.00)，意味著在測試圖像上兩者輸出完全相同。這證明了在10位小數精度下，幾乎沒有圖像品質損失。
-*   **對不同 `a` 值的探索**: 我們還測試了其他 `a` 值 (如 -0.75, -1.0)。在 `F_BITS = 10` 的條件下，這些 `a` 值的定點實現相對於其各自的浮點版本也取得了非常高的 PSNR（例如，`a=-0.75` 時 PSNR ≈ 57.37 dB，`a=-1.0` 時 PSNR ≈ 51.36 dB）。
+*   **策略**: 所有浮點運算轉換為定點整數運算。
+*   **參數**: 選擇了 **10位小數精度** (`F_BITS = 10`)。
+*   **圖像品質 (與 `matlab_imresize_equivalent.py` 比較, a=-0.5, F_BITS=10)**:
+    *   對於 `Cameraman.tif` (2x 放大)，我們的定點實現與 `matlab_imresize_equivalent.py` 的輸出相比，PSNR 達到了 **無限大** (MSE = 0.00)，實現了完美匹配。
+    *   對於更複雜的 `complex_test_image_256.png` (2x 放大)，兩者相比 PSNR 也達到了約 **64.43 dB** (MSE ≈ 0.02)，差異極小。
+    *   這證明了在 `F_BITS=10` 的精度下，我們的定點演算法能夠高度精確地複製目標浮點參考的輸出。
+*   **針對其他 `a` 值的優化依然保留**: 儘管當前比較的重點是 `a=-0.5` 以對齊 MATLAB，但 `hardware_friendly_bicubic.py` 中針對 `a=-0.75` 和 `a=-1.0` 的移位優化邏輯依然存在，並能在 `F_BITS=10` 下提供相對於各自浮點版本的高精度（如之前測試所示，PSNR > 50-60 dB）。
 
 ### 3.2. 乘法簡化 (Multiplication Simplification)
 
@@ -41,41 +46,72 @@
     *   減少高功耗的外部記憶體訪問次數，有助於降低系統總功耗。
     *   BRAM 被高效利用，這是 FPGA 設計中的常見且推薦的做法。
 
-## 4. Python 模擬結果匯總 (基於 `compare_algorithms.py`, 使用 `a=-0.5`, `F_BITS=10`)
+## 4. Python 模擬結果匯總 (基於 `compare_algorithms.py`)
 
-| 指標                     | 浮點 (a=-0.5) vs Pillow | 定點 (a=-0.5, F_BITS=10) vs Pillow | 定點 (a=-0.5, F_BITS=10) vs 浮點 (a=-0.5, 自實現) | 備註                                   |
-| ------------------------ | -------------- | ------------------------------------ | --------------------------------------------------- | -------------------------------------- |
-| PSNR (dB)                | 49.98          | 49.98                                | inf (完全匹配)                                        | 越高越好                               |
-| MSE                      | 0.65           | 0.65                                 | 0.00                                                | 越低越好                               |
-| **記憶體訪問減少因子**   | -              | -                                    | **約 32.37x**                                       | 相對於無緩衝的 naïve 實現             |
+本節總結了關鍵的性能指標。核心比較圍繞 MATLAB `imresize` (bicubic, `a=-0.5`) 的行為進行，使用 `src/matlab_imresize_equivalent.py` 作為 Python 浮點參考，並將我們的硬體友好型定點實現 (`src/hardware_friendly_bicubic.py`, `a=-0.5`, `F_BITS=10`) 與之對比。
 
-*   **其他 `a` 值結果 (F_BITS=10)**:
-    *   `a=-0.75`: 定點 vs 浮點 PSNR ≈ 57.37 dB (MSE ≈ 0.12)
-    *   `a=-1.0`: 定點 vs 浮點 PSNR ≈ 51.36 dB (MSE ≈ 0.48)
-*   **計算複雜度**: 定性分析確認，對於特定 `a` 值（-0.5, -0.75, -1.0），硬體友好型設計通過將浮點運算替換為優化的定點整數運算（移位和加/減法）以及通用的定點運算，簡化了算術邏輯。`a=-1.0` 的卷積核具有最少的移位/加法操作。
-*   **執行時間**: Python 環境下的執行時間 (例如，對於 64x64 -> 96x96 圖像，`float`: ~0.47s, `fixed-point` (`F_BITS=10`): ~0.50s; 對於 256x256 -> 512x512 圖像，`float`: ~13s, `fixed-point` (`F_BITS=10`): ~14s) 並不直接反映硬體性能，僅用於驗證演算法邏輯。定點版本在Python中由於更多的整數操作可能不會顯示速度優勢。
+**表1: `Cameraman.tif` (256x256, 2倍縮放) 的 PSNR/MSE 結果**
+*   **Python 浮點參考 vs. MATLAB `imresize`**:
+    *   PSNR: **41.58 dB**
+    *   MSE: 4.52
+    *   *此結果表明 `matlab_imresize_equivalent.py` 高度模擬了 MATLAB 的行為。*
+*   **硬體友好型定點 vs. Python 浮點參考 (`matlab_imresize_equivalent.py`)**:
+    *   PSNR: **Inf dB** (完全匹配)
+    *   MSE: 0.00
+    *   *此結果證明了我們的定點實現 (`a=-0.5, F_BITS=10`) 的高保真度。*
+*   **硬體友好型定點 vs. MATLAB `imresize` (推斷)**:
+    *   PSNR: **41.58 dB** (由於定點與Python浮點參考完美匹配)
+    *   MSE: 4.52
+    *   *這表明我們的優化定點演算法輸出與 MATLAB 標準高度一致。*
 
-### 4.1. 複雜測試圖像上的表現 (256x256 -> 512x512, `F_BITS=10`)
+**表2: `complex_test_image_256.png` (256x256, 2倍縮放, `a=-0.5`, `F_BITS=10`) 的 PSNR/MSE**
+| 指標                                                                 | PSNR (dB) | MSE    |
+| -------------------------------------------------------------------- | --------- | ------ |
+| 硬體友好型定點 vs. Python 浮點參考 (`matlab_imresize_equivalent.py`) | 64.43     | 0.02   |
+| Python 浮點參考 (`matlab_imresize_equivalent.py`) vs. Pillow         | 38.96     | 8.26   |
+| 硬體友好型定點 vs. Pillow                                              | 38.96     | 8.27   |
+*註: 此處的 Python 浮點參考特指 `matlab_imresize_equivalent.py`。與 Pillow 的比較顯示了與另一通用庫的差異。*
 
-為了進一步評估演算法在更複雜場景下的性能，我們使用了一個包含多種特徵（清晰邊緣、線條、圓形、漸變等）的 256x256 測試圖像 (`images/complex_test_image_256.png`)，並將其放大兩倍至 512x512。
 
-*   **定點 vs. 浮點一致性**: 對於所有測試的 `a` 值 (-0.5, -0.75, -1.0)，使用 `F_BITS=10` 的定點實現與其各自的浮點版本相比，均獲得了非常高的 PSNR (約 64 dB, MSE 約 0.02)。這表明即使在包含複雜特徵的圖像上進行較大幅度放大，10位小數精度也能確保定點運算與浮點運算結果高度一致。
-*   **與 Pillow BICUBIC 的比較**: 與 Pillow 的參考輸出相比，我們的各種 `a` 值實現（浮點和定點）的 PSNR 約為 38-39 dB。這與在 `gradient.png` 圖像上的觀察類似，主要反映了不同 Bicubic 實現之間的固有差異。
-*   **視覺評估**: 在 `images/output/` 目錄下保存了此測試用例的輸出圖像。我們鼓勵讀者進行主觀視覺比較，以觀察不同 `a` 值對圖像清晰度、邊緣銳利度、振鈴效應以及細節保留的具體影響。通常：
+*   **記憶體訪問減少因子**:
+    *   `gradient.png` (64x64, 1.5x 縮放): **約 32.37x**
+    *   `complex_test_image_256.png` (256x256, 2x 縮放): **約 62.29x** (相對於無緩衝的 naïve 實現)
+*   **計算複雜度 (針對 `a=-0.5` 的優化)**: 定性分析確認，硬體友好型設計通過將卷積核的浮點係數乘法替換為移位和加/減法，以及將核心插值轉為定點運算，顯著簡化了算術邏輯。
+*   **執行時間**: Python 環境下的執行時間 (例如，對於 `Cameraman.tif` 2x 放大，`matlab_equivalent_python`: ~0.5s (用戶提供), `fixed-point` (`F_BITS=10`): ~5.4s (用戶提供)) 並不直接反映硬體性能。我們的 Python 定點實現由於是純 Python 循環，通常比優化的 NumPy 或 MATLAB 內部實現慢。
+
+### 4.1. 視覺效果與 `complex_test_image_256.png`
+
+使用 `complex_test_image_256.png` 進行的測試（結果圖像保存在 `images/output/`）允許對插值結果進行視覺評估。
+*   由於我們的定點實現 (`a=-0.5, F_BITS=10`) 與 `matlab_imresize_equivalent.py` 的輸出在 `Cameraman.tif` 上完美匹配，在 `complex_test_image_256.png` 上 PSNR 也高達 64.43 dB，因此它們的視覺效果預期是幾乎無法區分的。
+*   用戶可以將 `images/output/Cameraman_matlab_equivalent_python.png` 或 `images/output/Cameraman_hardware_friendly_a-0.5_fb10.png` 與他們自己生成的 MATLAB `imresize` 輸出進行比較，以直觀感受 41.58 dB PSNR 對應的視覺相似度。
+*   `hardware_friendly_bicubic.py` 中仍然保留了對 `a=-0.75` 和 `a=-1.0` 的優化邏輯，如果需要，可以通過修改 `compare_algorithms.py` 中的 `a_val_for_comparison` 來測試這些 `a` 值下的定點輸出（相對於其各自的浮點版本的高精度之前已驗證）。
+
+這次成功的對齊 MATLAB 行為的迭代，極大增強了對該硬體友好型 Bicubic 實現的信心，證明了其在保持與業界標準工具高度一致的圖像品質的同時，實現了硬體優化的潛力。
     *   `a=-0.5` 在銳度和偽影之間提供較好的平衡。
     *   `a=-0.75` 和 `a=-1.0` 會產生更銳利的圖像，但也可能伴隨更明顯的振鈴效應，尤其是在高對比度邊緣處。
 
-這次額外的測試增強了我們對該硬體友好型 Bicubic 實現的信心，證明了其在不同圖像內容和縮放因子下的魯棒性和高精度（當 `F_BITS=10` 時）。
-
 ## 5. 結論與硬體優勢展望
 
-通過本次 Python 模擬，我們成功地設計並驗證了一種硬體友好的 Bicubic 插值演算法，並探索了不同參數（卷積核參數 `a` 和定點小數精度 `F_BITS`）的影響。對多種測試圖像和條件的評估表明，該演算法能夠在保持高圖像品質的同時，實現硬體友好的計算。
-**最終推薦採用 `a=-0.5` 和 `F_BITS=10` 的配置**，因為它在與浮點實現幾乎無法區分的圖像輸出品質 (PSNR > 100 dB，實際為inf) 和硬體友好特性之間取得了最佳平衡。
+通過本次 Python 模擬，我們成功地設計並驗證了一種硬體友好的 Bicubic 插值演算法。經過多次迭代，包括引入一個旨在精確模擬 MATLAB `imresize` 行為的 Python 浮點參考 (`src/matlab_imresize_equivalent.py`)，我們得出了以下核心結論：
 
-該演算法在保持極高品質輸出的前提下，展現出在硬體實現方面的顯著潛在優勢：
+1.  **實現與 MATLAB `imresize` 的高度一致性**:
+    *   通過使用 `matlab_imresize_equivalent.py`（其內部採用 `a=-0.5` 的三次卷積核以及特定的座標映射和邊界處理邏輯），我們的 Python 浮點參考能夠與 MATLAB `imresize(..., 'bicubic')` 的實際輸出達到 **41.58 dB** 的 PSNR（在 `Cameraman.tif` 2倍放大測試中）。這表明兩者行為高度一致。
 
-1.  **計算資源效率 (`F_BITS=10`)**:
-    *   **DSP 使用**: 大幅減少。卷積核的浮點係數乘法被消除（通過移位和加法實現），核心插值的浮點乘法轉為整數乘法。這可以用更少的 DSP Slices 或僅用 LUT 實現的小型乘法器完成。
+2.  **硬體友好型定點實現的高保真度**:
+    *   我們的硬體友好型定點 Bicubic 演算法 (`src/hardware_friendly_bicubic.py`)，在採用 **`a=-0.5`** 和 **`F_BITS=10`** （10位小數精度）的配置時，其輸出與上述 `matlab_imresize_equivalent.py` Python 浮點參考的輸出**完全相同** (PSNR = Inf dB, MSE = 0.00 for `Cameraman.tif`; PSNR ≈ 64.43 dB for `complex_test_image_256.png`)。
+
+3.  **推薦配置及其意義**:
+    *   基於以上結果，我們強烈推薦採用 **`a=-0.5` 和 `F_BITS=10`** 作為硬體友好型 Bicubic 插值的最佳配置。
+    *   此配置不僅確保了與廣泛使用的 MATLAB `imresize` 'bicubic' 標準的輸出結果高度一致（PSNR > 40 dB），同時通過定點化和針對 `a=-0.5` 的乘法簡化（移位替換）顯著降低了硬體實現的複雜性。
+
+4.  **項目價值**:
+    *   本項目成功地將一個常用的圖像處理演算法（Bicubic 插值）轉換為適合硬體實現的形式，並通過細緻的比較和迭代，驗證了其相對於業界標準工具的準確性。
+    *   這為開發低功耗、高性能的硬體圖像處理 IP 核提供了堅實的演算法基礎和 Python 驗證模型。
+
+該硬體友好型演算法在保持與 MATLAB `imresize` 高度一致的圖像品質的前提下，展現出在硬體實現方面的顯著潛在優勢：
+
+1.  **計算資源效率 (`a=-0.5, F_BITS=10`)**:
+    *   **DSP 使用**: 大幅減少。對於優化的 `a` 值，卷積核的浮點係數乘法被消除（通過移位和加法實現）。核心插值的浮點乘法轉為整數乘法。這可以用更少的 DSP Slices 或僅用 LUT 實現的小型乘法器完成。
     *   **邏輯單元**: 移位和整數加減運算主要消耗 LUT 和 FF 資源。`F_BITS=10` 會比 `F_BITS=8` 需要更寬的數據路徑，因此 LUT/FF 使用量會略有增加，但總體設計目標仍然是避免複雜的浮點單元。
 
 2.  **性能提升**:
