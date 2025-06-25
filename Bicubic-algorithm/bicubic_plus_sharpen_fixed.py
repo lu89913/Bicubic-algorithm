@@ -234,6 +234,28 @@ def imresizevec_fixed_point(inimg, fixed_weights, indices_0based, dim, frac_bits
     # If the overall function `imresize_optimized_fixed_point` processes uint8 to uint8, then this is correct.
     return outimg_clipped.astype(np.uint8)
 
+def apply_sharpen_filter_fixed_point(image_array_uint8, kernel):
+    """
+    Applies a 3x3 sharpening filter to a uint8 image.
+    Intermediate calculations use int32 to prevent overflow,
+    final result is clipped to [0, 255] and cast to uint8.
+    """
+    if kernel.shape != (3, 3):
+        raise ValueError("Kernel must be 3x3.")
+
+    padded_image = np.pad(image_array_uint8, pad_width=1, mode='reflect').astype(np.int32)
+    output_image = np.zeros_like(image_array_uint8, dtype=np.int32)
+    rows, cols = image_array_uint8.shape
+
+    for r in range(rows):
+        for c in range(cols):
+            neighborhood = padded_image[r:r+3, c:c+3]
+            sharpened_value = np.sum(neighborhood * kernel)
+            output_image[r, c] = sharpened_value
+
+    output_image_clipped = np.clip(output_image, 0, 255)
+    return output_image_clipped.astype(np.uint8)
+
 # calculate_psnr_arrays (copied from float version, can be shared utility)
 def calculate_psnr_arrays(arr1, arr2, max_pixel_value=255):
     if arr1.shape != arr2.shape:
@@ -305,13 +327,26 @@ def imresize_optimized_fixed_point(I, scalar_scale=None, output_shape=None, meth
     return B
 
 if __name__ == '__main__':
-    print("Running tests for optimized_bicubic_fixed_point.py...")
+    print("Running tests for bicubic_plus_sharpen_fixed.py...") # Changed script name
 
-    precompute_bicubic_lut()
+    # Ensure CUBIC_PARAM_A is -0.5 for the Bicubic part
+    if CUBIC_PARAM_A != -0.5:
+        print(f"Warning: CUBIC_PARAM_A is {CUBIC_PARAM_A}, expected -0.5 for this script's Bicubic base.")
+        # For this test, we explicitly want a=-0.5 before sharpening
+        # It should have been set globally already. This is a sanity check.
+
+    precompute_bicubic_lut() # This will use the global CUBIC_PARAM_A (should be -0.5)
 
     golden_img_path = "lena_golden_512.png"
     input_img_path = "lena_downscaled_256.png"
-    output_img_path = "lena_optimized_bicubic_fixed_512.png"
+    # Output path for the final sharpened image
+    output_img_path = "lena_bicubic_a_0_5_fixed_plus_sharpen_512.png"
+    output_bicubic_only_path = "lena_bicubic_a_0_5_fixed_temp_512.png" # Optional: save intermediate
+
+    # Define the sharpening kernel
+    sharpen_kernel = np.array([[0, -1, 0],
+                               [-1, 5, -1],
+                               [0, -1, 0]], dtype=np.int32)
 
     try:
         from PIL import Image
@@ -328,35 +363,57 @@ if __name__ == '__main__':
 
         print(f"Input image shape: {input_array.shape}, dtype: {input_array.dtype}")
         print(f"Golden image shape: {golden_array.shape}, dtype: {golden_array.dtype}")
-
         target_shape = golden_array.shape
 
-        print(f"\nTesting optimized fixed-point version (LUT_FRAC_BITS={LUT_FRAC_BITS})...")
+        # --- Step 1: Bicubic Interpolation (a=-0.5, fixed-point) ---
+        print(f"\nStep 1: Performing Bicubic Interpolation (a={CUBIC_PARAM_A}, fixed-point, LUT_FRAC_BITS={LUT_FRAC_BITS})...")
+        start_time_bicubic = time.time()
+        bicubic_interpolated_img = imresize_optimized_fixed_point(
+            input_array,
+            output_shape=target_shape,
+            method='bicubic_fixed' # This method uses the global CUBIC_PARAM_A
+        )
+        end_time_bicubic = time.time()
+        time_bicubic = end_time_bicubic - start_time_bicubic
+        print(f"Bicubic interpolation completed in {time_bicubic:.4f} seconds.")
+        print(f"Interpolated image shape: {bicubic_interpolated_img.shape}, dtype: {bicubic_interpolated_img.dtype}")
 
-        start_time = time.time()
-        resized_fixed_point = imresize_optimized_fixed_point(input_array, output_shape=target_shape, method='bicubic_fixed')
-        end_time = time.time()
+        # Optional: Save and check PSNR of bicubic-only result
+        # Image.fromarray(bicubic_interpolated_img).save(output_bicubic_only_path)
+        # psnr_bicubic_only = calculate_psnr_arrays(golden_array, bicubic_interpolated_img)
+        # print(f"PSNR (Bicubic a={CUBIC_PARAM_A} fixed-point vs golden): {psnr_bicubic_only:.4f} dB")
 
-        print(f"Resized fixed-point shape: {resized_fixed_point.shape}, dtype: {resized_fixed_point.dtype}")
-        print(f"Time taken for optimized fixed-point: {end_time - start_time:.4f} seconds")
+        # --- Step 2: Apply Sharpening Filter ---
+        print("\nStep 2: Applying sharpening filter...")
+        start_time_sharpen = time.time()
+        final_image = apply_sharpen_filter_fixed_point(bicubic_interpolated_img, sharpen_kernel)
+        end_time_sharpen = time.time()
+        time_sharpen = end_time_sharpen - start_time_sharpen
+        print(f"Sharpening filter applied in {time_sharpen:.4f} seconds.")
+        print(f"Final image shape: {final_image.shape}, dtype: {final_image.dtype}")
 
-        psnr_fixed_point = calculate_psnr_arrays(golden_array, resized_fixed_point)
-        if psnr_fixed_point is not None:
-            print(f"PSNR (optimized fixed-point vs golden): {psnr_fixed_point:.4f} dB")
+        total_time = time_bicubic + time_sharpen
+        print(f"\nTotal processing time: {total_time:.4f} seconds")
 
-        if resized_fixed_point.shape == target_shape:
-            Image.fromarray(resized_fixed_point.astype(np.uint8)).save(output_img_path)
-            print(f"Saved optimized fixed-point result to {output_img_path}")
+        # --- Step 3: Calculate PSNR of the final image ---
+        psnr_final = calculate_psnr_arrays(golden_array, final_image)
+        if psnr_final is not None:
+            print(f"PSNR (Bicubic a={CUBIC_PARAM_A} fixed + Sharpen vs golden): {psnr_final:.4f} dB")
 
-        print("\nReference PSNR from float version was ~34.1076 dB.")
-        print("Target: PSNR for fixed-point should be close to float version.")
+        if final_image.shape == target_shape:
+            Image.fromarray(final_image).save(output_img_path) # Already uint8
+            print(f"Saved final result to {output_img_path}")
+
+        print("\nReference PSNR values:")
+        print(f"  Bicubic a=-0.5 (fixed-point, from previous run): ~34.1079 dB")
+        print(f"  Bicubic a=-0.75 (fixed-point, from previous run): ~34.4135 dB")
 
     except FileNotFoundError as e:
         print(f"Error: Could not find Lena image files. Expected at ./{golden_img_path} and ./{input_img_path}.")
         print(f"Details: {e}")
     except Exception as e:
-        print(f"An error occurred during optimized fixed-point image processing tests: {e}")
+        print(f"An error occurred during processing: {e}")
         import traceback
         traceback.print_exc()
 
-    print("\nOptimized fixed-point bicubic script tests completed.")
+    print("\nBicubic plus sharpen (fixed-point) script tests completed.")
