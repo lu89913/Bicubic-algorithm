@@ -9,7 +9,7 @@ import time # For timing
 # Global parameters for LUT and Fixed Point
 SUBPIXEL_LEVELS = 128  # Number of discrete steps for subpixel positions within a pixel
 KERNEL_RADIUS = 2.0   # Bicubic kernel support is [-2, 2]
-CUBIC_PARAM_A = -0.5  # Standard 'a' for bicubic, Catmull-Rom if a=-0.5
+CUBIC_PARAM_A = -0.75 # Changed to -0.75 for higher PSNR variant
 LUT_FRAC_BITS = 10    # Fractional bits for fixed-point weights. Max weight is 1.0, so 1*2^10 = 1024. Min is around -0.21*1024 = -215. Fits in int16.
 
 # Precomputed FLOAT LUT for the cubic kernel (used to derive fixed-point weights)
